@@ -1,0 +1,70 @@
+{{ define "models" }}
+{{ template "head" . }}
+<div class="app-shell">
+  {{ template "conversation_sidebar" . }}
+  <main class="content">
+    {{ template "status_banner" . }}
+
+    <section class="hero card hero-compact">
+      <div>
+        <div class="eyebrow">Model management</div>
+        <h1>Manage GGUF models for llama.cpp</h1>
+        <p>Drop models into the shared models volume or download them here. The llama.cpp container watches the selected model file and keeps the chosen model loaded in memory until it changes.</p>
+      </div>
+      <div class="card inset-card">
+        <strong>Current model</strong>
+        <div class="current-model">{{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}No model selected{{ end }}</div>
+      </div>
+    </section>
+
+    <section class="overview-grid">
+      <article class="card">
+        <div class="eyebrow">Select a model</div>
+        <form class="stack-form" action="/models/select" method="post">
+          <label for="model">Available GGUF files</label>
+          <select id="model" name="model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if .Selected }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No models found</option>
+            {{ end }}
+          </select>
+          <button type="submit">Select model</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <div class="eyebrow">Download a model</div>
+        <form class="stack-form" action="/models/download" method="post">
+          <label for="url">Direct GGUF URL</label>
+          <input id="url" name="url" type="url" placeholder="https://example.com/model.gguf">
+          <button type="submit">Download</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Detected files</div>
+          <h2>Models volume contents</h2>
+        </div>
+      </div>
+      <div class="results-grid">
+        {{ range .Models }}
+        <article class="card result-card">
+          <h3>{{ .Name }}</h3>
+          <p>{{ .Path }}</p>
+          {{ if .Selected }}<div class="user-pill">Selected</div>{{ end }}
+        </article>
+        {{ else }}
+        <article class="card result-card">
+          <p>No GGUF files detected in the models volume.</p>
+        </article>
+        {{ end }}
+      </div>
+    </section>
+  </main>
+</div>
+{{ template "footer" . }}
+{{ end }}

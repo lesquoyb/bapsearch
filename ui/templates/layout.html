@@ -1,0 +1,158 @@
+{{ define "head" }}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .AppName }}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+{{ end }}
+
+{{ define "footer" }}
+<script>
+  function bapRenderMath(root) {
+    if (!window.renderMathInElement || !root) {
+      return;
+    }
+
+    renderMathInElement(root, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\(', right: '\\)', display: false },
+        { left: '\\[', right: '\\]', display: true }
+      ],
+      throwOnError: false
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    bapRenderMath(document.body);
+  });
+
+  document.body.addEventListener('htmx:afterSwap', function (event) {
+    bapRenderMath(event.target);
+  });
+
+  document.addEventListener('submit', function (event) {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-submit-loading')) {
+      return;
+    }
+
+    form.classList.add('is-submitting');
+    const button = form.querySelector('button[type="submit"]');
+    if (button) {
+      if (!button.dataset.originalLabel) {
+        button.dataset.originalLabel = button.textContent;
+      }
+      if (button.dataset.loadingLabel) {
+        button.textContent = button.dataset.loadingLabel;
+      }
+      button.disabled = true;
+    }
+  });
+</script>
+</body>
+</html>
+{{ end }}
+
+{{ define "status_banner" }}
+{{ if .Status }}
+<div class="status-banner">{{ .Status }}</div>
+{{ end }}
+{{ end }}
+
+{{ define "conversation_sidebar" }}
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/static/logo.png" alt="bap-search logo">
+      <span>
+        <strong>bap-search</strong>
+        <small>local conversational search</small>
+      </span>
+    </a>
+    <a class="ghost-button" href="/models">Models</a>
+  </div>
+
+  <div class="user-pill">User: {{ .UserID }}</div>
+
+  <div class="sidebar-section">
+    <h2>Conversations</h2>
+    {{ if .Conversations }}
+      <nav class="conversation-list">
+        {{ range .Conversations }}
+          <a class="conversation-link {{ if $.Conversation }}{{ if eq $.Conversation.ID .ID }}is-active{{ end }}{{ end }}" href="/conversations/{{ .ID }}">
+            <span>{{ .Title }}</span>
+            <small>{{ formatTime .UpdatedAt }}</small>
+          </a>
+        {{ end }}
+      </nav>
+    {{ else }}
+      <p class="muted">No conversations yet.</p>
+    {{ end }}
+  </div>
+</aside>
+{{ end }}
+
+{{ define "search_results" }}
+{{ if .SearchResults }}
+<div class="results-grid">
+  {{ range .SearchResults }}
+  <article class="card result-card">
+    <div class="eyebrow">{{ siteName .URL }}</div>
+    <h3><a href="{{ .URL }}" target="_blank" rel="noreferrer">{{ .Title }}</a></h3>
+    <div class="markdown-body markdown-compact">{{ markdown .Snippet }}</div>
+  </article>
+  {{ end }}
+</div>
+{{ else }}
+<p class="muted">No raw results stored for this conversation.</p>
+{{ end }}
+{{ end }}
+
+{{ define "summaries" }}
+{{ if .Summaries }}
+<div class="summary-grid">
+  {{ range .Summaries }}
+  <article class="card summary-card">
+    <div class="eyebrow">Summary</div>
+    <h3><a href="{{ .URL }}" target="_blank" rel="noreferrer">{{ .URL }}</a></h3>
+    <div class="markdown-body markdown-compact">{{ markdown .Summary }}</div>
+    <a class="inline-link" href="#chat">Ask follow-up questions</a>
+  </article>
+  {{ end }}
+</div>
+{{ else }}
+<div class="card pending-card">
+  <div class="eyebrow">Processing</div>
+  <p>Summaries are still running. This section refreshes automatically.</p>
+</div>
+{{ end }}
+{{ end }}
+
+{{ define "chat_messages" }}
+{{ if .Messages }}
+<div class="chat-thread">
+  {{ range .Messages }}
+  <article class="message message-{{ .Role }}">
+    <div class="message-role">{{ .Role }}</div>
+    <div class="message-body markdown-body">{{ markdown .Content }}</div>
+  </article>
+  {{ end }}
+</div>
+{{ else }}
+<p class="muted">Chat starts after the first search.</p>
+{{ end }}
+{{ end }}

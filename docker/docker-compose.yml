@@ -1,0 +1,115 @@
+services:
+  auth-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.1
+    profiles:
+      - auth
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      OAUTH2_PROXY_PROVIDER: ${OAUTH2_PROXY_PROVIDER:-github}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:-replace-me}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:-replace-me}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-0123456789abcdefghijklmnopqrstuv}
+      OAUTH2_PROXY_COOKIE_SECURE: ${OAUTH2_PROXY_COOKIE_SECURE:-false}
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REDIRECT_URL: ${OAUTH2_PROXY_REDIRECT_URL:-http://localhost:8080/oauth2/callback}
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${OAUTH2_PROXY_EMAIL_DOMAINS:-*}
+      OAUTH2_PROXY_UPSTREAMS: http://backend:8081
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+    ports:
+      - "8080:4180"
+    networks:
+      - public
+      - internal
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      searxng:
+        condition: service_healthy
+      llama:
+        condition: service_started
+    environment:
+      BAP_ADDR: :8081
+      BAP_DB_PATH: /database/bap-search.db
+      BAP_SCHEMA_PATH: /app/database/schema.sql
+      BAP_TEMPLATE_GLOB: /app/ui/templates/*.html
+      BAP_STATIC_DIR: /app/ui/static
+      BAP_MODELS_DIR: /models
+      BAP_CURRENT_MODEL_PATH: /models/current-model.txt
+      BAP_LOG_PATH: /logs/backend.jsonl
+      BAP_ALLOW_ANONYMOUS: ${BAP_ALLOW_ANONYMOUS:-true}
+      SEARXNG_SEARCH_URL: http://searxng:8080/search
+      LLAMA_CPP_URL: http://llama:8080/v1/chat/completions
+      BAP_SUMMARIZE_URL_LIMIT: ${BAP_SUMMARIZE_URL_LIMIT:-3}
+      BAP_FETCH_WORKERS: ${BAP_FETCH_WORKERS:-3}
+      BAP_SUMMARY_WORKERS: ${BAP_SUMMARY_WORKERS:-1}
+      BAP_MAX_EXTRACT_CHARS: ${BAP_MAX_EXTRACT_CHARS:-12000}
+      BAP_CHAT_CONTEXT_CHARS: ${BAP_CHAT_CONTEXT_CHARS:-4200}
+      BAP_MAX_CHAT_MESSAGES: ${BAP_MAX_CHAT_MESSAGES:-8}
+      BAP_LLM_MAX_TOKENS: ${BAP_LLM_MAX_TOKENS:-700}
+      BAP_LLM_CONTEXT_TOKENS: ${BAP_LLM_CONTEXT_TOKENS:-2048}
+    volumes:
+      - ../models:/models
+      - ../logs:/logs
+      - ../database:/database
+    ports:
+      - "8080:8081"
+    networks:
+      - public
+      - internal
+
+  llama:
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    restart: unless-stopped
+    environment:
+      MODEL_DIR: /models
+      CURRENT_MODEL_FILE: /models/current-model.txt
+      LLAMA_HOST: 0.0.0.0
+      LLAMA_PORT: 8080
+      LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE:-4096}
+      LLAMA_THREADS: ${LLAMA_THREADS:-4}
+      LLAMA_PARALLEL: ${LLAMA_PARALLEL:-1}
+      LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-0}
+      LLAMA_MAIN_GPU: ${LLAMA_MAIN_GPU:-0}
+      LLAMA_FLASH_ATTN: ${LLAMA_FLASH_ATTN:-false}
+      LLAMA_EXTRA_ARGS: ${LLAMA_EXTRA_ARGS:-}
+      MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
+      LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
+    entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
+    volumes:
+      - ../models:/models
+      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
+    networks:
+      - internal
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      BASE_URL: http://searxng:8080/
+      INSTANCE_NAME: bap-search
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=health&format=json', timeout=5)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    networks:
+      - public
+      - internal
+
+networks:
+  public:
+  internal:
+    internal: true

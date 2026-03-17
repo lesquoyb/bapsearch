@@ -1,0 +1,7 @@
+models/*.gguf
+models/*.part
+logs/*.jsonl
+database/*.db
+database/*.db-*
+backend/bap-search-backend.exe
+backend/bap-search-backend
