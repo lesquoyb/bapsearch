@@ -5,6 +5,7 @@
 - Docker and Docker Compose
 - At least one GGUF model placed in [models](../models)
 - OAuth provider credentials for OAuth2 Proxy only if you want authenticated access
+- Additional CPU and RAM headroom if you run the bundled Authentik stack
 
 ## First run
 
@@ -13,6 +14,7 @@
    - `OAUTH2_PROXY_PROVIDER`
    - `OAUTH2_PROXY_CLIENT_ID`
    - `OAUTH2_PROXY_CLIENT_SECRET`
+   - `OAUTH2_PROXY_OIDC_ISSUER_URL`
    - `OAUTH2_PROXY_COOKIE_SECRET`
    - `OAUTH2_PROXY_REDIRECT_URL`
 3. Add a GGUF model into [models](../models) or plan to download one from `/models` after startup.
@@ -33,6 +35,45 @@ If you later want to enable `oauth2-proxy`, provide real OAuth credentials in `.
 ```bash
 docker compose --profile auth up --build
 ```
+
+For a production-style auth setup that does not publish the backend port directly:
+
+```bash
+docker compose --profile auth -f docker-compose.yml -f docker-compose.auth-secure.yml up --build
+```
+
+### Authentik mode
+
+The repository also includes a self-hosted Authentik deployment. This adds `authentik-server`, `authentik-worker`, PostgreSQL, and Redis.
+
+Recommended path:
+
+1. Copy [.env.authentik.example](../.env.authentik.example) to `.env`.
+   If you run commands from [docker](../docker), either copy [docker/.env.authentik.example](../docker/.env.authentik.example) to [docker/.env](../docker/.env) or pass `--env-file ../.env.authentik.example` to `docker compose`.
+2. Start the stack:
+
+```bash
+docker compose --profile auth --profile authentik up --build
+```
+
+For a production-style auth setup that hides the backend completely:
+
+```bash
+docker compose --profile auth --profile authentik -f docker-compose.yml -f docker-compose.auth-secure.yml up --build
+```
+
+3. Open `http://localhost:9000/if/flow/initial-setup/`.
+4. Follow [docs/authentik.md](authentik.md) to create the Authentik application and provider.
+5. Copy the generated client ID and secret into `.env`.
+   If you run Compose from [docker](../docker), mirror those values into [docker/.env](../docker/.env).
+
+Important details:
+
+- `auth-proxy` listens on `8080`.
+- In Authentik mode, set `BAP_PUBLIC_PORT=8081` to avoid a host-port collision with `auth-proxy`.
+- In production, use [docker/docker-compose.auth-secure.yml](../docker/docker-compose.auth-secure.yml) so the backend is not published directly.
+- The issuer URL used by `oauth2-proxy` is `http://authentik-server:9000/application/o/bap-search/`.
+- Authentik itself is exposed on `9000` for HTTP and `9443` for HTTPS by default.
 
 ## Volumes and persistent data
 

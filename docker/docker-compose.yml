@@ -7,10 +7,19 @@ services:
     depends_on:
       backend:
         condition: service_started
+      authentik-server:
+        condition: service_started
+        required: false
     environment:
-      OAUTH2_PROXY_PROVIDER: ${OAUTH2_PROXY_PROVIDER:-github}
+      OAUTH2_PROXY_PROVIDER: ${OAUTH2_PROXY_PROVIDER:-oidc}
       OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:-replace-me}
       OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:-replace-me}
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OAUTH2_PROXY_OIDC_ISSUER_URL:-http://authentik-server:9000/application/o/bap-search/}
+      OAUTH2_PROXY_SCOPE: ${OAUTH2_PROXY_SCOPE:-openid profile email}
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: ${OAUTH2_PROXY_CODE_CHALLENGE_METHOD:-S256}
+      OAUTH2_PROXY_USER_ID_CLAIM: ${OAUTH2_PROXY_USER_ID_CLAIM:-sub}
+      OAUTH2_PROXY_EMAIL_CLAIM: ${OAUTH2_PROXY_EMAIL_CLAIM:-email}
+      OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: ${OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL:-true}
       OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-0123456789abcdefghijklmnopqrstuv}
       OAUTH2_PROXY_COOKIE_SECURE: ${OAUTH2_PROXY_COOKIE_SECURE:-false}
       OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
@@ -22,9 +31,105 @@ services:
       OAUTH2_PROXY_PASS_USER_HEADERS: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
     ports:
-      - "8080:4180"
+      - "${AUTH_PROXY_PUBLIC_PORT:-8080}:4180"
     networks:
       - public
+      - internal
+
+  authentik-postgresql:
+    image: postgres:16-alpine
+    profiles:
+      - authentik
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AUTHENTIK_POSTGRESQL__NAME:-authentik}
+      POSTGRES_USER: ${AUTHENTIK_POSTGRESQL__USER:-authentik}
+      POSTGRES_PASSWORD: ${AUTHENTIK_POSTGRESQL__PASSWORD:-change-me}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $$POSTGRES_DB -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - authentik-postgresql:/var/lib/postgresql/data
+    networks:
+      - internal
+
+  authentik-redis:
+    image: redis:7-alpine
+    profiles:
+      - authentik
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - authentik-redis:/data
+    networks:
+      - internal
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_VERSION:-2025.8.3}
+    profiles:
+      - authentik
+    restart: unless-stopped
+    command: server
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-change-me-to-a-long-random-string}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: ${AUTHENTIK_ERROR_REPORTING__ENABLED:-false}
+      AUTHENTIK_DISABLE_UPDATE_CHECK: ${AUTHENTIK_DISABLE_UPDATE_CHECK:-true}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_POSTGRESQL__NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_POSTGRESQL__USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRESQL__PASSWORD:-change-me}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-akadmin@example.com}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-change-me}
+    ports:
+      - "${AUTHENTIK_HTTP_PORT:-9000}:9000"
+      - "${AUTHENTIK_HTTPS_PORT:-9443}:9443"
+    volumes:
+      - authentik-media:/media
+      - authentik-templates:/templates
+    networks:
+      - public
+      - internal
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_VERSION:-2025.8.3}
+    profiles:
+      - authentik
+    restart: unless-stopped
+    command: worker
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-change-me-to-a-long-random-string}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: ${AUTHENTIK_ERROR_REPORTING__ENABLED:-false}
+      AUTHENTIK_DISABLE_UPDATE_CHECK: ${AUTHENTIK_DISABLE_UPDATE_CHECK:-true}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_POSTGRESQL__NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_POSTGRESQL__USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRESQL__PASSWORD:-change-me}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+    user: root
+    volumes:
+      - authentik-media:/media
+      - authentik-templates:/templates
+    networks:
       - internal
 
   backend:
@@ -62,7 +167,7 @@ services:
       - ../logs:/logs
       - ../database:/database
     ports:
-      - "8080:8081"
+      - "${BAP_PUBLIC_PORT:-8080}:8081"
     networks:
       - public
       - internal
@@ -113,3 +218,9 @@ networks:
   public:
   internal:
     internal: true
+
+volumes:
+  authentik-postgresql:
+  authentik-redis:
+  authentik-media:
+  authentik-templates:

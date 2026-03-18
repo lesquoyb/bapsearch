@@ -5,3 +5,7 @@ database/*.db
 database/*.db-*
 backend/bap-search-backend.exe
 backend/bap-search-backend
+backend/backend.exe
+docker/.env
+.env
+models/current-model.txt

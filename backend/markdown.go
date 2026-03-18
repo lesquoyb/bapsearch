@@ -14,9 +14,9 @@ import (
 )
 
 var (
-	markdownOnce sync.Once
-	markdowner   goldmark.Markdown
-	markdownSafe *bluemonday.Policy
+	markdownOnce           sync.Once
+	markdowner             goldmark.Markdown
+	markdownSafe           *bluemonday.Policy
 	wikiDisplayMathPattern = regexp.MustCompile(`\{\\displaystyle\s+([^{}]+)\}`)
 	wikiTextMathPattern    = regexp.MustCompile(`\{\\textstyle\s+([^{}]+)\}`)
 )

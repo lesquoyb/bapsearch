@@ -5,13 +5,13 @@
   <main class="content">
     {{ template "status_banner" . }}
 
-    <section class="hero card">
-      <div>
+    <section class="hero hero-home card">
+      <div class="hero-home-copy">
         <div class="eyebrow">Search-first workflow</div>
         <h1>Search the web, summarize locally, continue in chat.</h1>
         <p>SearXNG returns raw results immediately. bap-search then fetches the top pages, extracts article text with trafilatura, and summarizes them through llama.cpp.</p>
       </div>
-      <form class="search-form" action="/search" method="post" data-submit-loading>
+      <form class="search-form search-form-home" action="/search" method="post" data-submit-loading>
         <label for="q">Search query</label>
         <div class="search-row">
           <input id="q" name="q" type="search" placeholder="Compare local LLM inference runtimes on small CPUs" required>

@@ -20,6 +20,13 @@
 
 {{ define "footer" }}
 <script>
+  function bapApplySidebarState(collapsed) {
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    document.querySelectorAll('[data-sidebar-toggle]').forEach(function (button) {
+      button.setAttribute('aria-expanded', String(!collapsed));
+    });
+  }
+
   function bapRenderMath(root) {
     if (!window.renderMathInElement || !root) {
       return;
@@ -37,6 +44,17 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    const storedSidebarState = window.localStorage.getItem('bap-sidebar-collapsed');
+    bapApplySidebarState(storedSidebarState === 'true');
+
+    document.querySelectorAll('[data-sidebar-toggle]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        const nextCollapsed = !document.body.classList.contains('sidebar-collapsed');
+        window.localStorage.setItem('bap-sidebar-collapsed', String(nextCollapsed));
+        bapApplySidebarState(nextCollapsed);
+      });
+    });
+
     bapRenderMath(document.body);
   });
 
@@ -83,12 +101,15 @@
         <small>local conversational search</small>
       </span>
     </a>
-    <a class="ghost-button" href="/models">Models</a>
+  </div>
+
+  <div class="sidebar-actions">
+    <button class="ghost-button sidebar-toggle" type="button" data-sidebar-toggle aria-expanded="true" aria-label="Toggle conversations sidebar">Collapse sidebar</button>
   </div>
 
   <div class="user-pill">User: {{ .UserID }}</div>
 
-  <div class="sidebar-section">
+  <div class="sidebar-section sidebar-main-section">
     <h2>Conversations</h2>
     {{ if .Conversations }}
       <nav class="conversation-list">
@@ -103,6 +124,10 @@
       <p class="muted">No conversations yet.</p>
     {{ end }}
   </div>
+
+  <div class="sidebar-footer">
+    <a class="ghost-button sidebar-settings-link" href="/models">Settings</a>
+  </div>
 </aside>
 {{ end }}
 
@@ -110,8 +135,32 @@
 {{ if .SearchResults }}
 <div class="results-grid">
   {{ range .SearchResults }}
+  {{ $summary := index $.SummaryLookup .URL }}
   <article class="card result-card">
-    <div class="eyebrow">{{ siteName .URL }}</div>
+    <div class="result-card-topline">
+      <div class="source-hover" tabindex="0">
+        <div class="source-hover-head">
+          <img class="source-favicon" src="{{ faviconURL .URL }}" alt="" loading="lazy">
+          <div class="source-hover-trigger">
+          <span class="eyebrow source-hover-label">{{ siteName .URL }}</span>
+          </div>
+        </div>
+        <div class="source-summary-popover" role="dialog" aria-label="Summary preview for {{ siteName .URL }}">
+          <div class="popover-header-row">
+            <div class="popover-label">Résumé d'article</div>
+            <span class="summary-status summary-status-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}>{{ summaryStatusLabel $summary.Status }}</span>
+          </div>
+          {{ if $summary.Detail }}
+          <p class="summary-status-detail">{{ $summary.Detail }}</p>
+          {{ end }}
+          {{ if $summary.Summary }}
+          <div class="markdown-body markdown-compact">{{ markdown $summary.Summary }}</div>
+          {{ else }}
+          <p class="muted">Ce panneau se met à jour automatiquement pendant le traitement du résumé.</p>
+          {{ end }}
+        </div>
+      </div>
+    </div>
     <h3><a href="{{ .URL }}" target="_blank" rel="noreferrer">{{ .Title }}</a></h3>
     <div class="markdown-body markdown-compact">{{ markdown .Snippet }}</div>
   </article>
@@ -123,21 +172,18 @@
 {{ end }}
 
 {{ define "summaries" }}
-{{ if .Summaries }}
-<div class="summary-grid">
-  {{ range .Summaries }}
-  <article class="card summary-card">
-    <div class="eyebrow">Summary</div>
-    <h3><a href="{{ .URL }}" target="_blank" rel="noreferrer">{{ .URL }}</a></h3>
-    <div class="markdown-body markdown-compact">{{ markdown .Summary }}</div>
-    <a class="inline-link" href="#chat">Ask follow-up questions</a>
-  </article>
-  {{ end }}
-</div>
+{{ if and .OverviewSummary (ge .ReadySummaryCount .SummaryTarget) }}
+<article class="card summary-card summary-overview-card">
+  <div class="eyebrow">Overview</div>
+  <div class="markdown-body markdown-compact">{{ markdown .OverviewSummary }}</div>
+  <p class="muted">Hover a source label in the raw results above to inspect the per-article summary.</p>
+  <a class="inline-link" href="#chat">Ask follow-up questions</a>
+</article>
 {{ else }}
 <div class="card pending-card">
   <div class="eyebrow">Processing</div>
-  <p>Summaries are still running. This section refreshes automatically.</p>
+  <p>La synthèse globale attend les {{ .SummaryTarget }} résumés validés les plus pertinents. Progression actuelle: {{ .ReadySummaryCount }} / {{ .SummaryTarget }}.</p>
+  <p class="muted">Les résumés unitaires apparaissent au survol de chaque source dès qu'ils sont disponibles.</p>
 </div>
 {{ end }}
 {{ end }}

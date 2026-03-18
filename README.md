@@ -17,6 +17,7 @@ bap-search is a self-hosted conversational search engine designed for small mach
 - SQLite database
 - llama.cpp server container
 - OAuth2 Proxy for auth enforcement
+- Authentik optional self-hosted identity provider
 - SearXNG internal metasearch
 - Docker Compose orchestration
 
@@ -38,7 +39,7 @@ bap-search is a self-hosted conversational search engine designed for small mach
 
 ## Quick start
 
-1. Copy [.env.example](.env.example) to `.env` and fill the OAuth2 Proxy provider values.
+1. Copy [.env.example](.env.example) to `.env`.
 2. Put at least one GGUF model into [models](models) or download one from the UI after startup.
 3. Start the stack:
 
@@ -51,13 +52,44 @@ docker compose up --build
 
 By default, `http://localhost:8080` goes straight to the backend with anonymous local access enabled.
 
-If you later want authentication, start the optional proxy profile:
+If you later want authentication with an external OIDC provider, start the optional proxy profile:
 
 ```bash
 docker compose --profile auth -f docker/docker-compose.yml up --build
 ```
 
-In authenticated mode, the application is exposed through `auth-proxy`. `backend`, `llama`, and `searxng` stay internal to the Compose network.
+For a production-style auth setup where the backend is not published directly, add [docker/docker-compose.auth-secure.yml](docker/docker-compose.auth-secure.yml):
+
+```bash
+docker compose --profile auth -f docker/docker-compose.yml -f docker/docker-compose.auth-secure.yml up --build
+```
+
+With this override, only `auth-proxy` is published publicly. `backend`, `llama`, and `searxng` stay internal to the Compose network.
+
+## Authentik
+
+An integrated Authentik stack is included for self-hosted account management.
+
+1. Copy [.env.authentik.example](.env.authentik.example) to `.env`.
+	If you launch Compose from [docker](docker), also copy [docker/.env.authentik.example](docker/.env.authentik.example) to [docker/.env](docker/.env), or use `--env-file ../.env.authentik.example`.
+2. Start the stack:
+
+```bash
+docker compose --profile auth --profile authentik -f docker/docker-compose.yml up --build
+```
+
+For a production-style auth setup that hides the backend port completely, use:
+
+```bash
+docker compose --profile auth --profile authentik -f docker/docker-compose.yml -f docker/docker-compose.auth-secure.yml up --build
+```
+
+3. Open `http://localhost:9000/if/flow/initial-setup/` and finish the initial Authentik setup.
+4. Follow [docs/authentik.md](docs/authentik.md) to create the exact Authentik application and provider.
+5. Copy the Authentik client ID and client secret into `.env` as `OAUTH2_PROXY_CLIENT_ID` and `OAUTH2_PROXY_CLIENT_SECRET`.
+	If you run Compose from [docker](docker), keep the same values in [docker/.env](docker/.env) as well.
+
+`oauth2-proxy` is preconfigured to use the Authentik issuer URL `http://authentik-server:9000/application/o/bap-search/` from inside the Docker network. In the default Authentik preset, `auth-proxy` stays on port `8080`, while the backend is still reachable directly on `8081` for debugging. With [docker/docker-compose.auth-secure.yml](docker/docker-compose.auth-secure.yml), the backend is no longer published at all.
 
 For NVIDIA GPU mode, copy [.env.nvidia.example](.env.nvidia.example) to `.env` and run:
 
@@ -74,6 +106,7 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up 
 - [database](database)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/setup.md](docs/setup.md)
+- [docs/authentik.md](docs/authentik.md)
 - [docs/api.md](docs/api.md)
 - [docs/prompts.md](docs/prompts.md)
 - [docs/logging.md](docs/logging.md)
