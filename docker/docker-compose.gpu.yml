@@ -1,3 +1,9 @@
 services:
-  llama:
+  llama-answer:
+    gpus: all
+
+  llama-rewrite:
+    gpus: all
+
+  llama-embeddings:
     gpus: all

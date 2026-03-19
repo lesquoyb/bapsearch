@@ -15,6 +15,12 @@ type ModelInfo struct {
 	Selected bool
 }
 
+const (
+	modelRoleAnswer     = "answer"
+	modelRoleRewrite    = "rewrite"
+	modelRoleEmbeddings = "embeddings"
+)
+
 func (app *App) handleModelsPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -49,12 +55,14 @@ func (app *App) handleModelsPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	app.render(w, "models", PageData{
-		AppName:       "bap-search",
-		UserID:        meta.UserID,
-		Conversations: conversations,
-		Models:        models,
-		CurrentModel:  app.currentModelName(),
-		Status:        r.URL.Query().Get("status"),
+		AppName:        "bap-search",
+		UserID:         meta.UserID,
+		Conversations:  conversations,
+		Models:         models,
+		CurrentModel:   app.currentModelName(),
+		RewriteModel:   app.currentModelNameForRole(modelRoleRewrite),
+		EmbeddingModel: app.currentModelNameForRole(modelRoleEmbeddings),
+		Status:         r.URL.Query().Get("status"),
 		Prompts: map[string]string{
 			"prompt_summarize":  s,
 			"prompt_synthesize": sy,
@@ -70,6 +78,7 @@ func (app *App) handleModelSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	role := normalizeModelRole(r.FormValue("role"))
 	model := strings.TrimSpace(r.FormValue("model"))
 	if model == "" {
 		http.Redirect(w, r, "/models?status=missing+model", http.StatusSeeOther)
@@ -82,12 +91,12 @@ func (app *App) handleModelSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.WriteFile(app.cfg.CurrentModelPath, []byte(model), 0o644); err != nil {
+	if err := os.WriteFile(app.modelPathForRole(role), []byte(model), 0o644); err != nil {
 		http.Redirect(w, r, "/models?status=failed+to+select+model", http.StatusSeeOther)
 		return
 	}
 
-	loggerWithMeta(r.Context(), app.logger, 0).Info("model_selected", "model", model)
+	loggerWithMeta(r.Context(), app.logger, 0).Info("model_selected", "role", role, "model", model)
 	http.Redirect(w, r, "/models?status=model+selection+saved", http.StatusSeeOther)
 }
 
@@ -188,9 +197,35 @@ func (app *App) listModels() ([]ModelInfo, error) {
 }
 
 func (app *App) currentModelName() string {
-	payload, err := os.ReadFile(app.cfg.CurrentModelPath)
+	return app.currentModelNameForRole(modelRoleAnswer)
+}
+
+func (app *App) currentModelNameForRole(role string) string {
+	payload, err := os.ReadFile(app.modelPathForRole(role))
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(payload))
+}
+
+func (app *App) modelPathForRole(role string) string {
+	switch normalizeModelRole(role) {
+	case modelRoleRewrite:
+		return filepath.Join(app.cfg.ModelsDir, "current-rewrite-model.txt")
+	case modelRoleEmbeddings:
+		return filepath.Join(app.cfg.ModelsDir, "current-embedding-model.txt")
+	default:
+		return app.cfg.CurrentModelPath
+	}
+}
+
+func normalizeModelRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case modelRoleRewrite:
+		return modelRoleRewrite
+	case modelRoleEmbeddings:
+		return modelRoleEmbeddings
+	default:
+		return modelRoleAnswer
+	}
 }

@@ -1,0 +1,1 @@
+v5-small-text-matching-Q4_K_M.gguf

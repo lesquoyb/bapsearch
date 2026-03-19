@@ -25,6 +25,8 @@ type Config struct {
 	Addr                 string
 	SearchURL            string
 	LlamaURL             string
+	RewriteLLMURL        string
+	EmbeddingsURL        string
 	DBPath               string
 	SchemaPath           string
 	TemplateGlob         string
@@ -35,6 +37,7 @@ type Config struct {
 	TrafilaturaPath      string
 	SummarizeURLLimit    int
 	MaxExtractChars      int
+	MaxEmbeddingChars    int
 	FetchWorkers         int
 	SummaryWorkers       int
 	SummaryQueueSize     int
@@ -60,16 +63,18 @@ type App struct {
 }
 
 type PageData struct {
-	AppName       string
-	UserID        string
-	Conversations []ConversationListItem
-	Conversation  *ConversationView
-	Query         string
-	Models        []ModelInfo
-	CurrentModel  string
-	Error         string
-	Status        string
-	Prompts       map[string]string
+	AppName        string
+	UserID         string
+	Conversations  []ConversationListItem
+	Conversation   *ConversationView
+	Query          string
+	Models         []ModelInfo
+	CurrentModel   string
+	RewriteModel   string
+	EmbeddingModel string
+	Error          string
+	Status         string
+	Prompts        map[string]string
 }
 
 func main() {
@@ -164,17 +169,31 @@ func main() {
 			case "fetching":
 				return "Fetching content"
 			case "cleaning":
-				return "Cleaning content"
-			case "summarizing":
-				return "Summarizing in progress"
+				return "Extracting content"
+			case "embedding":
+				return "Embedding content"
+			case "ranking":
+				return "Ranking result"
 			case "skipped":
-				return "Summary skipped"
+				return "Skipped"
 			case "error":
 				return "Error"
 			case "ready":
-				return "Summary ready"
+				return "Ready"
 			default:
 				return "Unknown status"
+			}
+		},
+		"rewriteStatusLabel": func(status string) string {
+			switch strings.TrimSpace(status) {
+			case "running":
+				return "Rewriting query"
+			case "succeeded":
+				return "Rewrite succeeded"
+			case "failed":
+				return "Using original query"
+			default:
+				return "Rewrite pending"
 			}
 		},
 	}).ParseGlob(cfg.TemplateGlob)
@@ -186,15 +205,19 @@ func main() {
 	conversations := &ConversationService{db: db, logger: logger, summaryTarget: cfg.SummarizeURLLimit}
 	llm := &LLMService{
 		baseURL:           cfg.LlamaURL,
+		rewriteURL:        cfg.RewriteLLMURL,
+		embeddingsURL:     cfg.EmbeddingsURL,
 		client:            &http.Client{Timeout: 90 * time.Second},
 		logger:            logger,
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
+		maxEmbeddingChars: cfg.MaxEmbeddingChars,
 	}
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	summarizeService := &SummarizeService{
 		conversations: conversations,
+		search:        &SearchService{baseURL: cfg.SearchURL, client: &http.Client{Timeout: 20 * time.Second}},
 		fetch:         fetchService,
 		llm:           llm,
 		memory:        memoryService,
@@ -207,7 +230,7 @@ func main() {
 		logger:        logger,
 		db:            db,
 		templates:     templates,
-		search:        &SearchService{baseURL: cfg.SearchURL, client: &http.Client{Timeout: 20 * time.Second}},
+		search:        summarizeService.search,
 		fetch:         fetchService,
 		llm:           llm,
 		conversations: conversations,
@@ -224,7 +247,7 @@ func main() {
 		Handler:           app.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		WriteTimeout:      15 * time.Minute,
 		IdleTimeout:       120 * time.Second,
 	}
 
@@ -369,10 +392,11 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	role := normalizeModelRole(r.URL.Query().Get("role"))
 
-	parsed, err := url.Parse(app.cfg.LlamaURL)
+	parsed, err := url.Parse(app.llamaURLForRole(role))
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
 		return
 	}
 	baseURL := parsed.Scheme + "://" + parsed.Host
@@ -382,13 +406,13 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
 		return
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
 		return
 	}
 	defer resp.Body.Close()
@@ -398,7 +422,7 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(resp.Body).Decode(&body)
 
-	status := "unavailable"
+	status := "error"
 	switch {
 	case body.Status == "ok":
 		status = "loaded"
@@ -406,7 +430,18 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 		status = "loading"
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"status": status})
+	json.NewEncoder(w).Encode(map[string]string{"role": role, "status": status})
+}
+
+func (app *App) llamaURLForRole(role string) string {
+	switch normalizeModelRole(role) {
+	case modelRoleRewrite:
+		return app.cfg.RewriteLLMURL
+	case modelRoleEmbeddings:
+		return app.cfg.EmbeddingsURL
+	default:
+		return app.cfg.LlamaURL
+	}
 }
 
 func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -424,10 +459,13 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func loadConfig() Config {
+	answerURL := envOrDefault("LLAMA_CPP_URL", "http://llama:8080/v1/chat/completions")
 	return Config{
 		Addr:                 envOrDefault("BAP_ADDR", ":8081"),
 		SearchURL:            envOrDefault("SEARXNG_SEARCH_URL", "http://searxng:8080/search"),
-		LlamaURL:             envOrDefault("LLAMA_CPP_URL", "http://llama:8080/v1/chat/completions"),
+		LlamaURL:             answerURL,
+		RewriteLLMURL:        envOrDefault("LLAMA_CPP_REWRITE_URL", answerURL),
+		EmbeddingsURL:        envOrDefault("LLAMA_CPP_EMBEDDINGS_URL", "http://llama:8080/v1/embeddings"),
 		DBPath:               envOrDefault("BAP_DB_PATH", "/database/bap-search.db"),
 		SchemaPath:           envOrDefault("BAP_SCHEMA_PATH", "/app/database/schema.sql"),
 		TemplateGlob:         envOrDefault("BAP_TEMPLATE_GLOB", "/app/ui/templates/*.html"),
@@ -438,6 +476,7 @@ func loadConfig() Config {
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 12000),
+		MaxEmbeddingChars:    envOrDefaultInt("BAP_MAX_EMBEDDING_CHARS", 1800),
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
@@ -454,7 +493,61 @@ func applySchema(db *sql.DB, schemaPath string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(string(schema))
+	if _, err = db.Exec(string(schema)); err != nil {
+		return err
+	}
+
+	migrations := []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{table: "conversations", column: "rewritten_query", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "conversations", column: "rewrite_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
+		{table: "conversations", column: "rewrite_detail", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "conversations", column: "answer_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
+		{table: "conversations", column: "answer_detail", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "search_results", column: "query_variant", definition: "TEXT NOT NULL DEFAULT 'original'"},
+		{table: "summaries", column: "embedding_json", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "summaries", column: "similarity_score", definition: "REAL NOT NULL DEFAULT 0"},
+		{table: "summaries", column: "rerank_position", definition: "INTEGER NOT NULL DEFAULT 0"},
+	}
+
+	for _, migration := range migrations {
+		if err := ensureColumn(db, migration.table, migration.column, migration.definition); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func ensureColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if strings.EqualFold(name, column) {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
 	return err
 }
 

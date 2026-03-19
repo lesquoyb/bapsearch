@@ -154,3 +154,9 @@ func (recorder *statusRecorder) WriteHeader(statusCode int) {
 	recorder.status = statusCode
 	recorder.ResponseWriter.WriteHeader(statusCode)
 }
+
+func (recorder *statusRecorder) Flush() {
+	if flusher, ok := recorder.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}

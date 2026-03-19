@@ -31,14 +31,14 @@
 
 1. User submits a query to `POST /search`.
 2. Backend creates a conversation thread and stores the initial user message.
-3. Backend queries SearXNG and stores raw results.
-4. User is redirected to the conversation page immediately.
-5. Background summary workers pick the top distinct-host URLs.
-6. Backend downloads HTML pages concurrently.
-7. Backend pipes HTML into `trafilatura` and truncates extracted text.
-8. Backend summarizes extracted text through llama.cpp.
-9. Backend stores summaries and source excerpts in SQLite.
-10. HTMX refreshes the summaries block until results appear.
+3. Backend fires the original query to SearXNG immediately.
+4. In parallel, a rewrite model produces a stronger search query.
+5. The rewritten query is also sent to SearXNG and the two result sets are merged into raw results.
+6. Each newly stored URL is fetched and cleaned with `trafilatura` as soon as it is added.
+7. Extracted texts are embedded and persisted.
+8. The backend reranks sources by cosine similarity against the rewritten-query embedding.
+9. A final answer model streams a grounded answer from the top reranked sources and cites them.
+10. HTMX refreshes the result and pipeline blocks while the initial answer stream is rendered in real time.
 
 ## Conversation flow
 

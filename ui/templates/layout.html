@@ -63,6 +63,126 @@
   });
 
   (function () {
+    function scheduleInitialAnswerRetry(anchor, delayMs) {
+      if (!anchor || anchor.dataset.complete === 'true') return;
+      window.setTimeout(function () {
+        startInitialAnswerStream(anchor);
+      }, delayMs || 3000);
+    }
+
+    function startInitialAnswerStream(anchor) {
+      if (!anchor || anchor.dataset.enabled !== 'true' || anchor.dataset.complete === 'true' || anchor.dataset.inFlight === 'true') {
+        return;
+      }
+
+      var chatMessages = document.getElementById('chat-messages');
+      var spinnerText = document.getElementById('summary-spinner-text');
+      if (!chatMessages) return;
+
+      anchor.dataset.inFlight = 'true';
+
+      var aThread = chatMessages.querySelector('.chat-thread.is-initial-stream');
+      var aBubble;
+      var aBody;
+      if (!aThread) {
+        aBody = document.createElement('div');
+        aBody.className = 'message-body markdown-body';
+        aBody.textContent = 'Waiting for ranked sources...';
+
+        aBubble = document.createElement('article');
+        aBubble.className = 'message message-assistant';
+        aBubble.innerHTML = '<div class="message-role">assistant</div>';
+        aBubble.appendChild(aBody);
+
+        aThread = document.createElement('div');
+        aThread.className = 'chat-thread is-initial-stream';
+        aThread.appendChild(aBubble);
+        chatMessages.appendChild(aThread);
+      } else {
+        aBubble = aThread.querySelector('.message');
+        aBody = aThread.querySelector('.message-body');
+      }
+
+      fetch(anchor.dataset.streamUrl)
+        .then(async function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+
+          var reader = response.body.getReader();
+          var decoder = new TextDecoder();
+          var buffer = '';
+          var accumulated = '';
+          var completed = false;
+
+          while (true) {
+            var chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+
+            var parts = buffer.split('\n\n');
+            buffer = parts.pop();
+
+            for (var i = 0; i < parts.length; i++) {
+              var lines = parts[i].split('\n');
+              var evtName = 'message';
+              var dataLine = '';
+              for (var j = 0; j < lines.length; j++) {
+                if (lines[j].startsWith('event: ')) evtName = lines[j].slice(7);
+                else if (lines[j].startsWith('data: ')) dataLine = lines[j].slice(6);
+              }
+
+              if (evtName === 'status') {
+                try {
+                  var statusText = JSON.parse(dataLine);
+                  if (spinnerText && statusText) spinnerText.textContent = statusText;
+                  if (!accumulated && statusText) aBody.textContent = statusText;
+                } catch (_) {}
+              } else if (evtName === 'done') {
+                completed = true;
+                anchor.dataset.complete = 'true';
+                anchor.dataset.enabled = 'false';
+                var html = await fetch(anchor.dataset.refreshUrl).then(function (r) { return r.text(); });
+                chatMessages.innerHTML = html;
+                bapRenderMath(chatMessages);
+                var spinner = document.getElementById('summary-spinner');
+                if (spinner) spinner.style.display = 'none';
+              } else if (evtName === 'error') {
+                var errorText = dataLine;
+                try { errorText = JSON.parse(dataLine); } catch (_) {}
+                aBody.textContent = errorText;
+                aBubble.className = 'message message-system';
+                if (errorText.indexOf('still preparing') !== -1 || errorText.indexOf('No ranked source') !== -1) {
+                  scheduleInitialAnswerRetry(anchor, 3000);
+                }
+              } else if (dataLine) {
+                try {
+                  accumulated += JSON.parse(dataLine);
+                  aBody.textContent = accumulated;
+                  chatMessages.scrollTop = chatMessages.scrollHeight;
+                } catch (_) {}
+              }
+            }
+          }
+
+          if (!completed && anchor.dataset.complete !== 'true') {
+            scheduleInitialAnswerRetry(anchor, 3000);
+          }
+        })
+        .catch(function (err) {
+          aBody.textContent = 'Connection error: ' + err.message;
+          aBubble.className = 'message message-system';
+          scheduleInitialAnswerRetry(anchor, 5000);
+        })
+        .finally(function () {
+          anchor.dataset.inFlight = 'false';
+        });
+    }
+
+    var anchor = document.getElementById('initial-answer-stream');
+    if (!anchor) return;
+    startInitialAnswerStream(anchor);
+  })();
+
+  (function () {
     var form = document.getElementById('chat-form');
     if (!form) return;
 
@@ -166,23 +286,24 @@
   }
 
   (function () {
-    var LABELS = { loaded: 'Model ready', loading: 'Loading model...', unavailable: 'Model unavailable', unknown: 'Checking...' };
+    var LABELS = { loaded: 'Model ready', loading: 'Loading model...', error: 'Model error', unknown: 'Checking...' };
 
-    function applyLlamaStatus(status) {
-      document.querySelectorAll('.llama-status').forEach(function (el) {
-        var dot = el.querySelector('.llama-status-dot');
-        var label = el.querySelector('.llama-status-label');
-        if (dot) dot.className = 'llama-status-dot llama-status-dot-' + status;
-        if (label) label.textContent = LABELS[status] || status;
-        el.title = LABELS[status] || status;
-      });
+    function applyLlamaStatus(el, status) {
+      var dot = el.querySelector('.llama-status-dot');
+      var label = el.querySelector('.llama-status-label');
+      if (dot) dot.className = 'llama-status-dot llama-status-dot-' + status;
+      if (label) label.textContent = LABELS[status] || status;
+      el.title = LABELS[status] || status;
     }
 
     function pollLlamaStatus() {
-      fetch('/llama-status')
-        .then(function (r) { return r.json(); })
-        .then(function (data) { applyLlamaStatus(data.status || 'unavailable'); })
-        .catch(function () { applyLlamaStatus('unavailable'); });
+      document.querySelectorAll('.llama-status').forEach(function (el) {
+        var role = el.dataset.role || 'answer';
+        fetch('/llama-status?role=' + encodeURIComponent(role))
+          .then(function (r) { return r.json(); })
+          .then(function (data) { applyLlamaStatus(el, data.status || 'error'); })
+          .catch(function () { applyLlamaStatus(el, 'error'); });
+      });
     }
 
     document.addEventListener('DOMContentLoaded', function () {
@@ -277,20 +398,25 @@
           <img class="source-favicon" src="{{ faviconURL .URL }}" alt="" loading="lazy">
           <div class="source-hover-trigger">
           <span class="eyebrow source-hover-label">{{ siteName .URL }}</span>
+          {{ if .QueryVariant }}<span class="eyebrow">{{ .QueryVariant }}</span>{{ end }}
+          {{ if gt $summary.RerankPosition 0 }}<span class="eyebrow">rank {{ $summary.RerankPosition }}</span>{{ end }}
           </div>
         </div>
         <div class="source-summary-popover" role="dialog" aria-label="Summary preview for {{ siteName .URL }}">
           <div class="popover-header-row">
-            <div class="popover-label">Summary</div>
+            <div class="popover-label">Indexed source</div>
             <span class="summary-status summary-status-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}>{{ summaryStatusLabel $summary.Status }}</span>
           </div>
+          {{ if gt $summary.SimilarityScore 0.0 }}
+          <p class="summary-status-detail">Similarity: {{ printf "%.4f" $summary.SimilarityScore }}</p>
+          {{ end }}
           {{ if $summary.Detail }}
           <p class="summary-status-detail">{{ $summary.Detail }}</p>
           {{ end }}
           {{ if $summary.Summary }}
           <div class="markdown-body markdown-compact">{{ markdown $summary.Summary }}</div>
           {{ else }}
-          <p class="muted">This will automatically update as the summary is processed.</p>
+          <p class="muted">This will automatically update as extraction and ranking progress.</p>
           {{ end }}
         </div>
       </div>
@@ -306,13 +432,28 @@
 {{ end }}
 
 {{ define "summaries" }}
-{{ if and .OverviewSummary (ge .ReadySummaryCount .SummaryTarget) }}
+{{ if .OverviewSummary }}
 <div class="summary-ready-flag" hidden></div>
 {{ else }}
 <div class="card pending-card">
   <div class="eyebrow">Processing</div>
-  <p>The discussion will start automatically when the first synthesis is ready. Current progress: {{ .ReadySummaryCount }}&thinsp;/&thinsp;{{ .SummaryTarget }} validated article summaries.</p>
-  <p class="muted">You can already inspect each source summary by hovering over the source label in the raw results above.</p>
+  <p>Current phase: {{ if .AnswerStatus }}{{ .AnswerStatus }}{{ else }}pending{{ end }}. Indexed sources: {{ .ReadySummaryCount }}&thinsp;/&thinsp;{{ .SummaryTarget }}.</p>
+  <p class="muted">Original query: {{ .Title }}</p>
+  <p class="muted">Rewrite status: {{ rewriteStatusLabel .RewriteStatus }}.</p>
+  {{ if .RewrittenQuery }}
+  <p class="muted">Optimized search query: {{ .RewrittenQuery }}</p>
+  {{ else }}
+  <p class="muted">Optimized search query: none. The original query is being used.</p>
+  {{ end }}
+  <p class="muted">Raw result counts: original {{ .OriginalResultCount }}, rewritten {{ .RewrittenResultCount }}.</p>
+  {{ if .RewriteDetail }}
+  <p class="muted">{{ .RewriteDetail }}</p>
+  {{ end }}
+  {{ if .AnswerDetail }}
+  <p class="muted">{{ .AnswerDetail }}</p>
+  {{ else }}
+  <p class="muted">The final answer will stream here automatically as soon as the reranked sources are ready.</p>
+  {{ end }}
 </div>
 {{ end }}
 {{ end }}
@@ -328,6 +469,6 @@
   {{ end }}
 </div>
 {{ else }}
-<p class="muted">The first assistant synthesis will appear here as soon as the article summaries are ready.</p>
+<p class="muted">The grounded answer will appear here automatically once the source ranking is ready.</p>
 {{ end }}
 {{ end }}

@@ -6,7 +6,9 @@ bap-search is a self-hosted conversational search engine designed for small mach
 
 - Runs SearXNG internally and keeps it off the public network.
 - Returns raw search results immediately.
-- Fetches the top pages in the background, extracts article text with trafilatura, and summarizes them with a local LLM.
+- Runs the original user query and an LLM-rewritten search query in parallel against SearXNG.
+- Extracts source text as raw results arrive, embeds the extracted text, and reranks sources by similarity to the rewritten query.
+- Streams a grounded final answer from the top reranked sources, with citations back to the source sites.
 - Stores each search as a conversation thread with messages, results, summaries, and persistent user memory.
 - Serves a lightweight interface with HTML templates, HTMX, and minimal JavaScript.
 - Logs structured JSON events to a mounted logs volume.
@@ -31,11 +33,37 @@ bap-search is a self-hosted conversational search engine designed for small mach
 ## Core flow
 
 1. User submits a search.
-2. Backend creates a conversation and stores the initial user message.
-3. SearXNG returns raw results immediately.
-4. Background workers fetch top pages, run trafilatura, and summarize with llama.cpp.
-5. The UI refreshes summaries and lets the user continue in chat mode.
-6. User memory is periodically refreshed and reused in later prompts.
+2. Backend creates a conversation and starts the search pipeline in the background.
+3. The original query goes to SearXNG immediately while a small rewrite model produces a more precise search query in parallel.
+4. Both result sets are merged into the raw-results panel as they arrive.
+5. Each newly stored URL is fetched, cleaned with trafilatura, and embedded.
+6. The extracted sources are reranked by cosine similarity against the rewritten-query embedding.
+7. The final answer model streams a grounded response from the top reranked sources and cites them inline.
+8. User memory is periodically refreshed and reused in later prompts.
+
+## Multi-model endpoints
+
+The backend now supports separate endpoints for the three model roles in the pipeline:
+
+- `LLAMA_CPP_REWRITE_URL`: query rewrite model.
+- `LLAMA_CPP_EMBEDDINGS_URL`: embeddings model.
+- `LLAMA_CPP_URL`: final answer and follow-up chat model.
+
+The default Compose stack now starts three dedicated llama.cpp services:
+
+- `llama-answer`
+- `llama-rewrite`
+- `llama-embeddings`
+
+The answer model is still selected by the UI through `models/current-model.txt`.
+The rewrite and embeddings services watch these optional files in the shared models volume:
+
+- `models/current-rewrite-model.txt`
+- `models/current-embedding-model.txt`
+
+If either file is missing, the service falls back to the first `.gguf` file found in `models/`.
+
+To avoid llama.cpp batch-limit failures on long extracted pages, the backend truncates document text before `/v1/embeddings` using `BAP_MAX_EMBEDDING_CHARS`.
 
 ## Quick start
 

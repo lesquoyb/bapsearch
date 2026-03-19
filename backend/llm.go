@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type LLMMessage struct {
@@ -21,10 +22,13 @@ type LLMMessage struct {
 
 type LLMService struct {
 	baseURL           string
+	rewriteURL        string
+	embeddingsURL     string
 	client            *http.Client
 	logger            *slog.Logger
 	maxResponseTokens int
 	contextTokens     int
+	maxEmbeddingChars int
 	Prompts           LLMPrompts
 }
 
@@ -40,6 +44,11 @@ Produce a concise factual summary of the extracted page.
 Focus on facts useful for answering the user's query.
 Return plain text with 3 short bullet points and one short concluding sentence.`
 
+	DefaultPromptRewriteSearch = `You rewrite a user query into a stronger web search query.
+Return only one short search string.
+Prefer precise nouns, product names, standards, dates, error names, and discriminating keywords.
+Do not add explanations, quotes, bullets, or prefixes.`
+
 	DefaultPromptSynthesize = `You are bap-search, a conversational search engine.
 You receive article summaries that were already generated from individual search results.
 Answer the user's query as directly as the source summaries allow.
@@ -48,6 +57,15 @@ Return plain text markdown with:
 - a short direct answer or synthesis paragraph
 - 3 to 5 concise bullet points grounded in the summaries
 - one short line starting with "Limits:"`
+
+	DefaultPromptGroundedAnswer = `You are bap-search, a grounded web answer engine.
+Answer only from the provided extracted source texts.
+Every factual claim must cite at least one source using bracket citations like [1] or [2].
+If the sources are insufficient, say so explicitly.
+Return concise markdown with:
+- one short direct answer paragraph
+- 3 to 6 factual bullet points with citations
+- one short line starting with "Sources:" listing the source numbers you relied on`
 
 	DefaultPromptChat = `You are bap-search, a conversational search engine.
 Answer using the provided summaries, extracted source text, and conversation history.
@@ -114,7 +132,23 @@ type llamaStreamChunk struct {
 	} `json:"choices"`
 }
 
+type llamaEmbeddingRequest struct {
+	Input any    `json:"input"`
+	Model string `json:"model,omitempty"`
+}
+
+type llamaEmbeddingResponse struct {
+	Data []struct {
+		Embedding []float64 `json:"embedding"`
+	} `json:"data"`
+	Embedding []float64 `json:"embedding"`
+}
+
 func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages []LLMMessage, maxTokens int) (string, error) {
+	return service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens)
+}
+
+func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int) (string, error) {
 	if maxTokens <= 0 {
 		maxTokens = service.maxResponseTokens
 	}
@@ -147,7 +181,11 @@ func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages 
 		"prompt", strings.Join(promptPreview, "\n\n"),
 	)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, service.baseURL, bytes.NewReader(body))
+	if strings.TrimSpace(endpoint) == "" {
+		endpoint = service.baseURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -191,6 +229,10 @@ func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages 
 // ChatStream sends a streaming request to llama.cpp and calls onToken for each
 // content delta. It returns the full accumulated response when done.
 func (service *LLMService) ChatStream(ctx context.Context, meta RequestMeta, messages []LLMMessage, maxTokens int, onToken func(string)) (string, error) {
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, maxTokens, onToken)
+}
+
+func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int, onToken func(string)) (string, error) {
 	if maxTokens <= 0 {
 		maxTokens = service.maxResponseTokens
 	}
@@ -211,6 +253,9 @@ func (service *LLMService) ChatStream(ctx context.Context, meta RequestMeta, mes
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, service.baseURL, bytes.NewReader(body))
+	if endpoint != "" {
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	}
 	if err != nil {
 		return "", err
 	}
@@ -265,6 +310,109 @@ func (service *LLMService) ChatStream(ctx context.Context, meta RequestMeta, mes
 		"chars", len(result),
 	)
 	return result, nil
+}
+
+func (service *LLMService) RewriteSearchQuery(ctx context.Context, meta RequestMeta, query string) (string, error) {
+	messages := []LLMMessage{
+		{Role: "system", Content: DefaultPromptRewriteSearch},
+		{Role: "user", Content: query},
+	}
+
+	rewritten, err := service.chatWithURL(ctx, service.rewriteURL, meta, messages, 64)
+	if err != nil {
+		return "", err
+	}
+
+	cleaned := sanitizeSearchQuery(rewritten)
+	if cleaned == "" {
+		return "", fmt.Errorf("rewrite model returned an empty query")
+	}
+	return cleaned, nil
+}
+
+func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, fmt.Errorf("cannot embed empty text")
+	}
+
+	limit := service.maxEmbeddingChars
+	if limit <= 0 {
+		limit = 1800
+	}
+	text = service.truncateForPrompt(text, limit)
+
+	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := strings.TrimSpace(service.embeddingsURL)
+	if endpoint == "" {
+		return nil, fmt.Errorf("embeddings endpoint is not configured")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := service.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	var payloadResponse llamaEmbeddingResponse
+	if err := json.Unmarshal(responseBody, &payloadResponse); err != nil {
+		return nil, err
+	}
+
+	if len(payloadResponse.Data) > 0 && len(payloadResponse.Data[0].Embedding) > 0 {
+		return payloadResponse.Data[0].Embedding, nil
+	}
+	if len(payloadResponse.Embedding) > 0 {
+		return payloadResponse.Embedding, nil
+	}
+
+	return nil, fmt.Errorf("embedding endpoint returned no vector")
+}
+
+func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onToken func(string)) (string, error) {
+	blocks := make([]string, 0, len(sources))
+	for index, source := range sources {
+		if strings.TrimSpace(source.SourceText) == "" {
+			continue
+		}
+		block := fmt.Sprintf("[%d] %s\nURL: %s\nSimilarity: %.4f\n\nExtracted text:\n%s", index+1, compactContextText(source.Title, 180), source.URL, source.SimilarityScore, service.truncateForPrompt(source.SourceText, 3000))
+		blocks = append(blocks, block)
+	}
+
+	if len(blocks) == 0 {
+		return "", fmt.Errorf("no ranked sources available for answer generation")
+	}
+
+	targetQuery := strings.TrimSpace(rewrittenQuery)
+	if targetQuery == "" {
+		targetQuery = strings.TrimSpace(originalQuery)
+	}
+
+	messages := []LLMMessage{
+		{Role: "system", Content: DefaultPromptGroundedAnswer},
+		{Role: "user", Content: fmt.Sprintf("Original user query: %s\nOptimized search query: %s\n\nTop ranked sources:\n\n%s", originalQuery, targetQuery, strings.Join(blocks, "\n\n"))},
+	}
+
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, service.maxResponseTokens, onToken)
 }
 
 func (service *LLMService) SummarizePage(ctx context.Context, meta RequestMeta, query, memory, url, text string) (string, error) {
@@ -490,4 +638,95 @@ func (service *LLMService) truncateForPrompt(value string, maxChars int) string 
 	}
 
 	return strings.TrimSpace(string(runes[:maxChars-suffixLen])) + suffix
+}
+
+func sanitizeSearchQuery(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "\"'`")
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.TrimPrefix(value, "query:")
+	value = strings.TrimPrefix(value, "Query:")
+	value = strings.Join(strings.Fields(value), " ")
+	if len([]rune(value)) > 180 {
+		value = string([]rune(value)[:180])
+	}
+	value = strings.TrimSpace(strings.Trim(value, "|/\\.,:;_-"))
+	if !isUsableSearchQuery(value) {
+		return ""
+	}
+	return value
+}
+
+func isUsableSearchQuery(value string) bool {
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) < 3 {
+		return false
+	}
+
+	words := strings.Fields(strings.ToLower(value))
+	if len(words) > 0 {
+		uniqueWords := map[string]int{}
+		maxRepeatedWordRun := 1
+		currentRepeatedWordRun := 1
+		for index, word := range words {
+			uniqueWords[word]++
+			if index > 0 && word == words[index-1] {
+				currentRepeatedWordRun++
+				if currentRepeatedWordRun > maxRepeatedWordRun {
+					maxRepeatedWordRun = currentRepeatedWordRun
+				}
+			} else {
+				currentRepeatedWordRun = 1
+			}
+		}
+
+		if len(words) >= 4 && len(uniqueWords) == 1 {
+			return false
+		}
+		if maxRepeatedWordRun >= 3 {
+			return false
+		}
+	}
+
+	alnumCount := 0
+	punctuationCount := 0
+	maxRepeatedPunctuation := 0
+	currentRepeatedPunctuation := 0
+	var lastPunctuation rune
+
+	for _, char := range value {
+		switch {
+		case unicode.IsLetter(char) || unicode.IsDigit(char):
+			alnumCount++
+			currentRepeatedPunctuation = 0
+			lastPunctuation = 0
+		case unicode.IsSpace(char):
+			currentRepeatedPunctuation = 0
+			lastPunctuation = 0
+		default:
+			punctuationCount++
+			if char == lastPunctuation {
+				currentRepeatedPunctuation++
+			} else {
+				currentRepeatedPunctuation = 1
+				lastPunctuation = char
+			}
+			if currentRepeatedPunctuation > maxRepeatedPunctuation {
+				maxRepeatedPunctuation = currentRepeatedPunctuation
+			}
+		}
+	}
+
+	if alnumCount < 3 {
+		return false
+	}
+	if punctuationCount > alnumCount {
+		return false
+	}
+	if maxRepeatedPunctuation >= 4 {
+		return false
+	}
+
+	return true
 }

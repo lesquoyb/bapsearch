@@ -37,12 +37,21 @@ type SummaryRecord struct {
 	SourceText string
 	Status     string
 	Detail     string
+	SimilarityScore float64
+	RerankPosition  int
 }
 
 type ConversationView struct {
 	ID                int64
 	UserID            string
 	Title             string
+	RewrittenQuery    string
+	RewriteStatus     string
+	RewriteDetail     string
+	AnswerStatus      string
+	AnswerDetail      string
+	OriginalResultCount  int
+	RewrittenResultCount int
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	Messages          []MessageRecord
@@ -111,24 +120,14 @@ func (app *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	loggerWithMeta(r.Context(), app.logger, conversationID).Info("search_query", "query", query)
 
-	searchResponse, err := app.search.Search(r.Context(), query)
-	if err != nil {
-		loggerWithMeta(r.Context(), app.logger, conversationID).Error("search failed", "error", err)
-		http.Redirect(w, r, "/?status=search+failed", http.StatusSeeOther)
-		return
-	}
-
-	if err := app.conversations.StoreSearchResults(r.Context(), conversationID, searchResponse.Results, searchResponse.EngineStatus); err != nil {
-		loggerWithMeta(r.Context(), app.logger, conversationID).Error("storing search results failed", "error", err)
-		http.Error(w, "failed to store search results", http.StatusInternalServerError)
-		return
+	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "searching", "Preparing the search pipeline."); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("initializing answer status failed", "error", err)
 	}
 
 	app.summaryJobs <- SummaryJob{
 		ConversationID: conversationID,
 		UserID:         meta.UserID,
 		Query:          query,
-		Results:        searchResponse.Results,
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/conversations/%d", conversationID), http.StatusSeeOther)
@@ -153,6 +152,8 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleConversationView(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "results" && r.Method == http.MethodGet:
 		app.handleConversationResults(w, r, conversationID)
+	case len(parts) == 3 && parts[1] == "answer" && parts[2] == "stream" && r.Method == http.MethodGet:
+		app.handleConversationAnswerStream(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "summaries" && r.Method == http.MethodGet:
 		app.handleConversationSummaries(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "summaries" && parts[2] == "regenerate" && r.Method == http.MethodPost:
@@ -276,6 +277,98 @@ func (app *App) handleConversationRegenerateSummaries(w http.ResponseWriter, r *
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/conversations/%d", conversationID), http.StatusSeeOther)
+}
+
+func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+
+	if strings.TrimSpace(conversation.OverviewSummary) != "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		fmt.Fprint(w, "event: done\ndata: \"\"\n\n")
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	writeEvent := func(event, data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		fl.Flush()
+	}
+
+	writeEvent("status", "Waiting for the ranked sources.")
+
+	readyConversation, err := app.conversations.WaitForAnswerReady(r.Context(), meta.UserID, conversationID, 90*time.Second, func(status, detail string) {
+		message := strings.TrimSpace(detail)
+		if message == "" {
+			message = strings.TrimSpace(status)
+		}
+		writeEvent("status", message)
+	})
+	if err != nil {
+		writeEvent("error", err.Error())
+		return
+	}
+
+	sources, err := app.conversations.ListTopRankedSources(r.Context(), conversationID, app.cfg.SummarizeURLLimit)
+	if err != nil {
+		writeEvent("error", "Failed to load ranked sources.")
+		return
+	}
+	if len(sources) == 0 {
+		writeEvent("error", "No ranked source is available yet.")
+		return
+	}
+
+	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "streaming", "Streaming the final grounded answer."); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("updating answer status failed", "error", err)
+	}
+
+	replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
+	reply, err := app.llm.GenerateGroundedSearchAnswerStream(r.Context(), replyMeta, readyConversation.Title, readyConversation.RewrittenQuery, sources, func(token string) {
+		encoded, _ := json.Marshal(token)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	})
+	if err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("grounded answer generation failed", "error", err)
+		_ = app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "error", err.Error())
+		writeEvent("error", chatFailureMessage(err))
+		return
+	}
+
+	if err := app.conversations.AddMessage(r.Context(), conversationID, "assistant", reply); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("storing assistant answer failed", "error", err)
+		writeEvent("error", "The answer was generated but could not be stored.")
+		return
+	}
+	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "complete", "Grounded answer generated."); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("finalizing answer status failed", "error", err)
+	}
+
+	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
+
+	writeEvent("done", "")
 }
 
 func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -573,16 +666,16 @@ func (service *ConversationService) StoreSearchResults(ctx context.Context, conv
 
 	for _, result := range results {
 		if _, err := tx.ExecContext(ctx, `
-            INSERT INTO search_results (conversation_id, url, title, snippet, rank)
-            VALUES (?, ?, ?, ?, ?)
-        `, conversationID, result.URL, result.Title, result.Snippet, result.Rank); err != nil {
+			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, rank)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.Rank); err != nil {
 			return err
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-            INSERT INTO summaries (conversation_id, url, summary, source_text, status, status_detail)
-            VALUES (?, ?, '', '', 'pending', '')
-        `, conversationID, result.URL); err != nil {
+			INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+			VALUES (?, ?, '', '', '', 0, 0, 'pending', '')
+		`, conversationID, result.URL); err != nil {
 			return err
 		}
 	}
@@ -603,10 +696,122 @@ func (service *ConversationService) StoreSearchResults(ctx context.Context, conv
 	return tx.Commit()
 }
 
+func (service *ConversationService) AppendSearchResults(ctx context.Context, conversationID int64, results []SearchResult, engineStatus []SearchEngineStatus) ([]SearchResult, error) {
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	existing := map[string]struct{}{}
+	rows, err := tx.QueryContext(ctx, `SELECT url FROM search_results WHERE conversation_id = ?`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		existing[url] = struct{}{}
+	}
+	rows.Close()
+
+	var maxRank int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(rank), 0) FROM search_results WHERE conversation_id = ?`, conversationID).Scan(&maxRank); err != nil {
+		return nil, err
+	}
+
+	inserted := make([]SearchResult, 0, len(results))
+	for _, result := range results {
+		if strings.TrimSpace(result.URL) == "" {
+			continue
+		}
+		if _, ok := existing[result.URL]; ok {
+			continue
+		}
+		maxRank++
+		result.Rank = maxRank
+		if strings.TrimSpace(result.QueryVariant) == "" {
+			result.QueryVariant = "original"
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, rank)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.Rank); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+			VALUES (?, ?, '', '', '', 0, 0, 'pending', '')
+			ON CONFLICT(conversation_id, url) DO NOTHING
+		`, conversationID, result.URL); err != nil {
+			return nil, err
+		}
+
+		existing[result.URL] = struct{}{}
+		inserted = append(inserted, result)
+	}
+
+	for _, status := range engineStatus {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO search_engine_statuses (conversation_id, engine, status, detail, result_count)
+			VALUES (?, ?, ?, ?, ?)
+		`, conversationID, status.Engine, status.Status, status.Detail, status.ResultCount); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return inserted, nil
+}
+
+func (service *ConversationService) StoreRewrittenQuery(ctx context.Context, conversationID int64, rewrittenQuery string) error {
+	_, err := service.db.ExecContext(ctx, `
+		UPDATE conversations
+		SET rewritten_query = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, strings.TrimSpace(rewrittenQuery), conversationID)
+	return err
+}
+
+func (service *ConversationService) UpdateRewriteStatus(ctx context.Context, conversationID int64, status, detail string) error {
+	_, err := service.db.ExecContext(ctx, `
+		UPDATE conversations
+		SET rewrite_status = ?, rewrite_detail = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(detail), conversationID)
+	return err
+}
+
+func (service *ConversationService) GetRewrittenQuery(ctx context.Context, conversationID int64) (string, error) {
+	var value string
+	err := service.db.QueryRowContext(ctx, `SELECT rewritten_query FROM conversations WHERE id = ?`, conversationID).Scan(&value)
+	return value, err
+}
+
+func (service *ConversationService) UpdateAnswerStatus(ctx context.Context, conversationID int64, status, detail string) error {
+	_, err := service.db.ExecContext(ctx, `
+		UPDATE conversations
+		SET answer_status = ?, answer_detail = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(detail), conversationID)
+	return err
+}
+
 func (service *ConversationService) StoreSummary(ctx context.Context, conversationID int64, url, summary, sourceText string) error {
 	_, err := service.db.ExecContext(ctx, `
-        INSERT INTO summaries (conversation_id, url, summary, source_text, status, status_detail)
-        VALUES (?, ?, ?, ?, 'ready', '')
+		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, ?, ?, '', 0, 0, 'ready', '')
         ON CONFLICT(conversation_id, url) DO UPDATE SET
             summary = excluded.summary,
             source_text = excluded.source_text,
@@ -622,10 +827,29 @@ func (service *ConversationService) StoreSummary(ctx context.Context, conversati
 	return err
 }
 
+func (service *ConversationService) StoreDocument(ctx context.Context, conversationID int64, url, summary, sourceText, embeddingJSON string) error {
+	_, err := service.db.ExecContext(ctx, `
+		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, ?, ?, ?, 0, 0, 'ready', '')
+		ON CONFLICT(conversation_id, url) DO UPDATE SET
+			summary = excluded.summary,
+			source_text = excluded.source_text,
+			embedding_json = excluded.embedding_json,
+			status = 'ready',
+			status_detail = '',
+			updated_at = CURRENT_TIMESTAMP
+	`, conversationID, url, summary, sourceText, embeddingJSON)
+	if err != nil {
+		return err
+	}
+	_, err = service.db.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
+	return err
+}
+
 func (service *ConversationService) UpdateSummaryStatus(ctx context.Context, conversationID int64, url, status, detail string) error {
 	_, err := service.db.ExecContext(ctx, `
-        INSERT INTO summaries (conversation_id, url, summary, source_text, status, status_detail)
-        VALUES (?, ?, '', '', ?, ?)
+		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, '', '', '', 0, 0, ?, ?)
         ON CONFLICT(conversation_id, url) DO UPDATE SET
             status = excluded.status,
             status_detail = excluded.status_detail,
@@ -641,8 +865,8 @@ func (service *ConversationService) UpdateSummaryStatus(ctx context.Context, con
 
 func (service *ConversationService) UpdateSummarySource(ctx context.Context, conversationID int64, url, sourceText string) error {
 	_, err := service.db.ExecContext(ctx, `
-        INSERT INTO summaries (conversation_id, url, summary, source_text, status, status_detail)
-        VALUES (?, ?, '', ?, 'pending', '')
+		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, '', ?, '', 0, 0, 'pending', '')
         ON CONFLICT(conversation_id, url) DO UPDATE SET
             source_text = excluded.source_text,
             updated_at = CURRENT_TIMESTAMP
@@ -655,14 +879,24 @@ func (service *ConversationService) UpdateSummarySource(ctx context.Context, con
 	return err
 }
 
+
+func (service *ConversationService) UpdateDocumentRanking(ctx context.Context, conversationID int64, url string, similarity float64, position int) error {
+	_, err := service.db.ExecContext(ctx, `
+		UPDATE summaries
+		SET similarity_score = ?, rerank_position = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE conversation_id = ? AND url = ?
+	`, similarity, position, conversationID, url)
+	return err
+}
+
 func (service *ConversationService) GetConversationView(ctx context.Context, userID string, conversationID int64) (ConversationView, error) {
 	conversation := ConversationView{}
 	row := service.db.QueryRowContext(ctx, `
-        SELECT id, user_id, title, created_at, updated_at
+		SELECT id, user_id, title, rewritten_query, rewrite_status, rewrite_detail, answer_status, answer_detail, created_at, updated_at
         FROM conversations
         WHERE id = ? AND user_id = ?
     `, conversationID, userID)
-	if err := row.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.CreatedAt, &conversation.UpdatedAt); err != nil {
+	if err := row.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.RewrittenQuery, &conversation.RewriteStatus, &conversation.RewriteDetail, &conversation.AnswerStatus, &conversation.AnswerDetail, &conversation.CreatedAt, &conversation.UpdatedAt); err != nil {
 		return ConversationView{}, err
 	}
 
@@ -677,6 +911,13 @@ func (service *ConversationService) GetConversationView(ctx context.Context, use
 		return ConversationView{}, err
 	}
 	conversation.SearchResults = results
+	for _, result := range results {
+		if result.QueryVariant == "rewritten" {
+			conversation.RewrittenResultCount++
+		} else {
+			conversation.OriginalResultCount++
+		}
+	}
 
 	engineStatus, err := service.GetSearchEngineStatus(ctx, conversationID)
 	if err != nil {
@@ -709,7 +950,7 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE summaries
-		SET summary = '', source_text = '', status = 'pending', status_detail = '', updated_at = CURRENT_TIMESTAMP
+		SET summary = '', source_text = '', embedding_json = '', similarity_score = 0, rerank_position = 0, status = 'pending', status_detail = '', updated_at = CURRENT_TIMESTAMP
 		WHERE conversation_id = ?
 	`, conversationID); err != nil {
 		return err
@@ -729,6 +970,14 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 	}
 
 	if _, err := tx.ExecContext(ctx, `
+		UPDATE conversations
+		SET rewritten_query = '', rewrite_status = 'pending', rewrite_detail = '', answer_status = 'searching', answer_detail = 'Reprocessing the existing raw results.', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, conversationID); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
 	`, conversationID); err != nil {
 		return err
@@ -739,10 +988,13 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 
 func (service *ConversationService) GetSearchResults(ctx context.Context, conversationID int64) ([]SearchResult, error) {
 	rows, err := service.db.QueryContext(ctx, `
-        SELECT url, title, snippet, rank
-        FROM search_results
-        WHERE conversation_id = ?
-        ORDER BY rank ASC
+		SELECT r.url, r.title, r.snippet, r.query_variant, r.rank
+		FROM search_results r
+		LEFT JOIN summaries s ON s.conversation_id = r.conversation_id AND s.url = r.url
+		WHERE r.conversation_id = ?
+		ORDER BY CASE WHEN COALESCE(s.rerank_position, 0) > 0 THEN 0 ELSE 1 END ASC,
+		         COALESCE(s.rerank_position, 0) ASC,
+		         r.rank ASC
     `, conversationID)
 	if err != nil {
 		return nil, err
@@ -752,7 +1004,7 @@ func (service *ConversationService) GetSearchResults(ctx context.Context, conver
 	results := []SearchResult{}
 	for rows.Next() {
 		var item SearchResult
-		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.Rank); err != nil {
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Rank); err != nil {
 			return nil, err
 		}
 		results = append(results, item)
@@ -791,10 +1043,10 @@ func (service *ConversationService) GetSearchEngineStatus(ctx context.Context, c
 
 func (service *ConversationService) GetSummaries(ctx context.Context, conversationID int64) ([]SummaryRecord, error) {
 	rows, err := service.db.QueryContext(ctx, `
-	SELECT url, summary, source_text, status, status_detail
+	SELECT url, summary, source_text, status, status_detail, similarity_score, rerank_position
         FROM summaries
         WHERE conversation_id = ?
-	ORDER BY created_at ASC, id ASC
+	ORDER BY CASE WHEN rerank_position > 0 THEN 0 ELSE 1 END, rerank_position ASC, created_at ASC, id ASC
     `, conversationID)
 	if err != nil {
 		return nil, err
@@ -804,12 +1056,64 @@ func (service *ConversationService) GetSummaries(ctx context.Context, conversati
 	summaries := []SummaryRecord{}
 	for rows.Next() {
 		var item SummaryRecord
-		if err := rows.Scan(&item.URL, &item.Summary, &item.SourceText, &item.Status, &item.Detail); err != nil {
+		if err := rows.Scan(&item.URL, &item.Summary, &item.SourceText, &item.Status, &item.Detail, &item.SimilarityScore, &item.RerankPosition); err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, item)
 	}
 	return summaries, rows.Err()
+}
+
+func (service *ConversationService) ListRankedSources(ctx context.Context, conversationID int64) ([]RankedSource, error) {
+	rows, err := service.db.QueryContext(ctx, `
+		SELECT s.url, r.title, r.snippet, r.query_variant, s.summary, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
+		FROM summaries s
+		JOIN search_results r ON r.conversation_id = s.conversation_id AND r.url = s.url
+		WHERE s.conversation_id = ?
+	`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sources := []RankedSource{}
+	for rows.Next() {
+		var item RankedSource
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Summary, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
+			return nil, err
+		}
+		sources = append(sources, item)
+	}
+	return sources, rows.Err()
+}
+
+func (service *ConversationService) ListTopRankedSources(ctx context.Context, conversationID int64, limit int) ([]RankedSource, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+
+	rows, err := service.db.QueryContext(ctx, `
+		SELECT s.url, r.title, r.snippet, r.query_variant, s.summary, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
+		FROM summaries s
+		JOIN search_results r ON r.conversation_id = s.conversation_id AND r.url = s.url
+		WHERE s.conversation_id = ? AND s.rerank_position > 0 AND s.status = 'ready' AND s.source_text != ''
+		ORDER BY s.rerank_position ASC
+		LIMIT ?
+	`, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sources := []RankedSource{}
+	for rows.Next() {
+		var item RankedSource
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Summary, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
+			return nil, err
+		}
+		sources = append(sources, item)
+	}
+	return sources, rows.Err()
 }
 
 func (service *ConversationService) getMessages(ctx context.Context, conversationID int64) ([]MessageRecord, error) {
@@ -870,7 +1174,7 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 		}
 
 		excerpt := compactContextText(summary.SourceText, 700)
-		block := fmt.Sprintf("URL: %s\nSummary:\n%s\n", summary.URL, compactContextText(summary.Summary, 1400))
+		block := fmt.Sprintf("URL: %s\nRerank position: %d\nSimilarity: %.4f\nSummary:\n%s\n", summary.URL, summary.RerankPosition, summary.SimilarityScore, compactContextText(summary.Summary, 1400))
 		if excerpt != "" {
 			block += fmt.Sprintf("\nExtracted text excerpt:\n%s\n", excerpt)
 		}
@@ -900,6 +1204,47 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 	}
 
 	return builder.String(), nil
+}
+
+func (service *ConversationService) WaitForAnswerReady(ctx context.Context, userID string, conversationID int64, timeout time.Duration, onProgress func(status, detail string)) (ConversationView, error) {
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	lastStatus := ""
+	lastDetail := ""
+
+	for {
+		conversation, err := service.GetConversationView(ctx, userID, conversationID)
+		if err != nil {
+			return ConversationView{}, err
+		}
+		if strings.TrimSpace(conversation.OverviewSummary) != "" || conversation.AnswerStatus == "ready" || conversation.AnswerStatus == "complete" {
+			return conversation, nil
+		}
+		if conversation.AnswerStatus == "error" {
+			if strings.TrimSpace(conversation.AnswerDetail) == "" {
+				return ConversationView{}, fmt.Errorf("the answer pipeline failed")
+			}
+			return ConversationView{}, fmt.Errorf("%s", conversation.AnswerDetail)
+		}
+
+		if onProgress != nil && (conversation.AnswerStatus != lastStatus || conversation.AnswerDetail != lastDetail) {
+			onProgress(conversation.AnswerStatus, conversation.AnswerDetail)
+			lastStatus = conversation.AnswerStatus
+			lastDetail = conversation.AnswerDetail
+		}
+
+		if time.Now().After(deadline) {
+			return ConversationView{}, fmt.Errorf("the answer pipeline is still preparing sources")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ConversationView{}, ctx.Err()
+		case <-time.After(750 * time.Millisecond):
+		}
+	}
 }
 
 func (service *ConversationService) GetSetting(ctx context.Context, key, fallback string) string {
@@ -952,7 +1297,7 @@ func buildSummaryLookup(summaries []SummaryRecord) map[string]SummaryRecord {
 func countReadySummaries(summaries []SummaryRecord) int {
 	count := 0
 	for _, summary := range summaries {
-		if summary.Status == "ready" && strings.TrimSpace(summary.Summary) != "" {
+		if summary.Status == "ready" && strings.TrimSpace(summary.SourceText) != "" {
 			count++
 		}
 	}

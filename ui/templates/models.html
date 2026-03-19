@@ -9,17 +9,43 @@
       <div>
         <div class="eyebrow">Model management</div>
         <h1>Manage GGUF models for llama.cpp</h1>
-        <p>Drop models into the shared models volume or download them here. The llama.cpp container watches the selected model file and keeps the chosen model loaded in memory until it changes.</p>
+        <p>Drop models into the shared models volume or download them here. This page controls the answer model through <code>models/current-model.txt</code>. The rewrite and embeddings services can be pinned separately with <code>models/current-rewrite-model.txt</code> and <code>models/current-embedding-model.txt</code>.</p>
       </div>
-      <div class="card inset-card">
-        <div class="model-status-card">
-          <div>
-            <strong>Current model</strong>
-            <div class="current-model">{{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}No model selected{{ end }}</div>
+      <div class="overview-grid">
+        <div class="card inset-card">
+          <div class="model-status-card">
+            <div>
+              <strong>Answer model</strong>
+              <div class="current-model">{{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}No model selected{{ end }}</div>
+            </div>
+            <div class="llama-status" data-role="answer" title="Checking...">
+              <span class="llama-status-dot llama-status-dot-unknown"></span>
+              <span class="llama-status-label">Checking...</span>
+            </div>
           </div>
-          <div class="llama-status" title="Checking...">
-            <span class="llama-status-dot llama-status-dot-unknown"></span>
-            <span class="llama-status-label">Checking...</span>
+        </div>
+        <div class="card inset-card">
+          <div class="model-status-card">
+            <div>
+              <strong>Rewrite model</strong>
+              <div class="current-model">{{ if .RewriteModel }}{{ .RewriteModel }}{{ else }}No model selected{{ end }}</div>
+            </div>
+            <div class="llama-status" data-role="rewrite" title="Checking...">
+              <span class="llama-status-dot llama-status-dot-unknown"></span>
+              <span class="llama-status-label">Checking...</span>
+            </div>
+          </div>
+        </div>
+        <div class="card inset-card">
+          <div class="model-status-card">
+            <div>
+              <strong>Embeddings model</strong>
+              <div class="current-model">{{ if .EmbeddingModel }}{{ .EmbeddingModel }}{{ else }}No model selected{{ end }}</div>
+            </div>
+            <div class="llama-status" data-role="embeddings" title="Checking...">
+              <span class="llama-status-dot llama-status-dot-unknown"></span>
+              <span class="llama-status-label">Checking...</span>
+            </div>
           </div>
         </div>
       </div>
@@ -27,17 +53,50 @@
 
     <section class="overview-grid">
       <article class="card">
-        <div class="eyebrow">Select a model</div>
+        <div class="eyebrow">Answer role</div>
         <form class="stack-form" action="/models/select" method="post">
-          <label for="model">Available GGUF files</label>
-          <select id="model" name="model">
+          <input type="hidden" name="role" value="answer">
+          <label for="answer-model">Available GGUF files</label>
+          <select id="answer-model" name="model">
             {{ range .Models }}
-              <option value="{{ .Name }}" {{ if .Selected }}selected{{ end }}>{{ .Name }}</option>
+              <option value="{{ .Name }}" {{ if eq .Name $.CurrentModel }}selected{{ end }}>{{ .Name }}</option>
             {{ else }}
               <option value="">No models found</option>
             {{ end }}
           </select>
-          <button type="submit">Select model</button>
+          <button type="submit">Select answer model</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <div class="eyebrow">Rewrite role</div>
+        <form class="stack-form" action="/models/select" method="post">
+          <input type="hidden" name="role" value="rewrite">
+          <label for="rewrite-model">Available GGUF files</label>
+          <select id="rewrite-model" name="model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if eq .Name $.RewriteModel }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No models found</option>
+            {{ end }}
+          </select>
+          <button type="submit">Select rewrite model</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <div class="eyebrow">Embeddings role</div>
+        <form class="stack-form" action="/models/select" method="post">
+          <input type="hidden" name="role" value="embeddings">
+          <label for="embedding-model">Available GGUF files</label>
+          <select id="embedding-model" name="model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if eq .Name $.EmbeddingModel }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No models found</option>
+            {{ end }}
+          </select>
+          <button type="submit">Select embeddings model</button>
         </form>
       </article>
 
@@ -63,7 +122,9 @@
         <article class="card result-card">
           <h3>{{ .Name }}</h3>
           <p>{{ .Path }}</p>
-          {{ if .Selected }}<div class="user-pill">Selected</div>{{ end }}
+          {{ if eq .Name $.CurrentModel }}<div class="user-pill">Answer</div>{{ end }}
+          {{ if eq .Name $.RewriteModel }}<div class="user-pill">Rewrite</div>{{ end }}
+          {{ if eq .Name $.EmbeddingModel }}<div class="user-pill">Embeddings</div>{{ end }}
         </article>
         {{ else }}
         <article class="card result-card">

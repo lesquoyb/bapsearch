@@ -150,6 +150,10 @@ body.sidebar-collapsed .app-shell {
   background: var(--danger);
 }
 
+.llama-status-dot-error {
+  background: var(--danger);
+}
+
 .llama-status-dot-unknown {
   background: var(--line);
 }

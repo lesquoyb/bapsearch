@@ -20,7 +20,10 @@
 
     <section class="section-block">
       <div class="section-header section-header-inline">
-        <h2>Raw results</h2>
+        <div>
+          <h2>Raw results</h2>
+          <p class="muted">Results move automatically as soon as they receive a rerank position.</p>
+        </div>
         {{ if .Conversation.EngineStatus }}
         <div class="engine-status-line engine-status-inline" aria-label="Search engine status">
           {{ range .Conversation.EngineStatus }}
@@ -37,7 +40,7 @@
     <section class="section-block" id="chat">
       <div class="section-header">
         <div>
-          <h2>Discussion</h2>
+          <h2>Grounded answer</h2>
         </div>
         <div class="section-header-actions">
           <small>Selected model: {{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}none selected{{ end }}</small>
@@ -50,9 +53,9 @@
         </div>
       </div>
 
-      <div id="summary-spinner" class="panel-loading-row" aria-live="polite"{{ if and .Conversation.OverviewSummary (ge .Conversation.ReadySummaryCount .Conversation.SummaryTarget) }} style="display:none"{{ end }}>
+      <div id="summary-spinner" class="panel-loading-row" aria-live="polite"{{ if .Conversation.OverviewSummary }} style="display:none"{{ end }}>
         <span class="spinner" aria-hidden="true"></span>
-        <span id="summary-spinner-text">Preparing the initial synthesis...</span>
+        <span id="summary-spinner-text">Preparing the ranked sources and the final grounded answer...</span>
       </div>
 
       <div id="summary-panel"
@@ -66,6 +69,11 @@
       <div id="chat-messages">
         {{ template "chat_messages" .Conversation }}
       </div>
+
+      <div id="initial-answer-stream"
+        data-stream-url="/conversations/{{ .Conversation.ID }}/answer/stream"
+        data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
+        data-enabled="{{ if .Conversation.OverviewSummary }}false{{ else }}true{{ end }}"></div>
 
       <div class="panel-loading-row htmx-indicator" id="chat-loading" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>

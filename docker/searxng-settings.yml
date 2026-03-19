@@ -1,4 +1,7 @@
-use_default_settings: true
+use_default_settings:
+  engines:
+    remove:
+      - google
 server:
   secret_key: "change-me-in-production"
   limiter: false
