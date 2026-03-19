@@ -12,8 +12,16 @@
         <p>Drop models into the shared models volume or download them here. The llama.cpp container watches the selected model file and keeps the chosen model loaded in memory until it changes.</p>
       </div>
       <div class="card inset-card">
-        <strong>Current model</strong>
-        <div class="current-model">{{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}No model selected{{ end }}</div>
+        <div class="model-status-card">
+          <div>
+            <strong>Current model</strong>
+            <div class="current-model">{{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}No model selected{{ end }}</div>
+          </div>
+          <div class="llama-status" title="Checking...">
+            <span class="llama-status-dot llama-status-dot-unknown"></span>
+            <span class="llama-status-label">Checking...</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -63,6 +71,40 @@
         </article>
         {{ end }}
       </div>
+    </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Prompt engineering</div>
+          <h2>Edit system prompts</h2>
+        </div>
+      </div>
+      <form class="stack-form" action="/models/prompts" method="post">
+        <article class="card">
+          <div class="eyebrow">Article summarization</div>
+          <p class="muted">Used when summarizing each individual search result page.</p>
+          <textarea name="prompt_summarize" rows="6">{{ index .Prompts "prompt_summarize" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">Global synthesis</div>
+          <p class="muted">Used to generate the final overview answer from all article summaries.</p>
+          <textarea name="prompt_synthesize" rows="8">{{ index .Prompts "prompt_synthesize" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">Chat replies</div>
+          <p class="muted">Used when answering follow-up questions in the conversation.</p>
+          <textarea name="prompt_chat" rows="6">{{ index .Prompts "prompt_chat" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">User memory</div>
+          <p class="muted">Used to update the persistent user memory after each conversation.</p>
+          <textarea name="prompt_memory" rows="3">{{ index .Prompts "prompt_memory" }}</textarea>
+        </article>
+        <div>
+          <button type="submit">Save prompts</button>
+        </div>
+      </form>
     </section>
   </main>
 </div>

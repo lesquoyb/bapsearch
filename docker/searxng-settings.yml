@@ -5,8 +5,20 @@ server:
   image_proxy: false
 search:
   safe_search: 0
+  default_lang: en-US
+  ban_time_on_fail: 0
+  max_ban_time_on_fail: 0
+  suspended_times:
+    SearxEngineAccessDenied: 0
+    SearxEngineCaptcha: 0
+    SearxEngineTooManyRequests: 30
   formats:
     - html
     - json
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  retries: 1
+  enable_http2: false
 ui:
   static_use_hash: true

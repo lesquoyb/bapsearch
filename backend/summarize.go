@@ -19,6 +19,7 @@ type SummaryJob struct {
 	UserID         string
 	Query          string
 	Results        []SearchResult
+	ForceFull      bool
 }
 
 type SummarizeService struct {
@@ -47,16 +48,21 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 	logger := loggerWithMeta(ctx, service.logger, job.ConversationID)
 	logger.Info("summary_job_started", "query", job.Query)
 
-	pickedResults := pickRelevantResults(job.Results, service.urlLimit*summaryCandidateMultiplier)
+	pickedResults := job.Results
+	if !job.ForceFull {
+		pickedResults = pickRelevantResults(job.Results, service.urlLimit*summaryCandidateMultiplier)
+	}
 	pickedURLs := make(map[string]struct{}, len(pickedResults))
 	for _, result := range pickedResults {
 		pickedURLs[result.URL] = struct{}{}
 	}
-	for _, result := range job.Results {
-		if _, ok := pickedURLs[result.URL]; ok {
-			continue
+	if !job.ForceFull {
+		for _, result := range job.Results {
+			if _, ok := pickedURLs[result.URL]; ok {
+				continue
+			}
+			service.updateSummaryStatus(jobContext, logger, job.ConversationID, result.URL, "skipped", "Ignored because higher-ranked sources were selected first.")
 		}
-		service.updateSummaryStatus(jobContext, logger, job.ConversationID, result.URL, "skipped", "Ignored because higher-ranked sources were selected first.")
 	}
 
 	documents := service.fetch.FetchAndExtract(jobContext, meta, pickedResults, func(url, status, detail string) {

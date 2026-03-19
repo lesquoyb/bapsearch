@@ -34,6 +34,20 @@ func (app *App) handleModelsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s, sy, c, m := app.llm.Prompts.GetAll()
+	if strings.TrimSpace(s) == "" {
+		s = DefaultPromptSummarize
+	}
+	if strings.TrimSpace(sy) == "" {
+		sy = DefaultPromptSynthesize
+	}
+	if strings.TrimSpace(c) == "" {
+		c = DefaultPromptChat
+	}
+	if strings.TrimSpace(m) == "" {
+		m = DefaultPromptMemory
+	}
+
 	app.render(w, "models", PageData{
 		AppName:       "bap-search",
 		UserID:        meta.UserID,
@@ -41,6 +55,12 @@ func (app *App) handleModelsPage(w http.ResponseWriter, r *http.Request) {
 		Models:        models,
 		CurrentModel:  app.currentModelName(),
 		Status:        r.URL.Query().Get("status"),
+		Prompts: map[string]string{
+			"prompt_summarize":  s,
+			"prompt_synthesize": sy,
+			"prompt_chat":       c,
+			"prompt_memory":     m,
+		},
 	})
 }
 

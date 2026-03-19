@@ -17,11 +17,13 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: clip;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: clip;
   color: var(--ink);
   background:
     radial-gradient(circle at top left, rgba(12, 124, 89, 0.12), transparent 28%),
@@ -37,6 +39,8 @@ a {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   min-height: 100vh;
+  min-width: 0;
+  max-width: 100%;
   transition: grid-template-columns 180ms ease;
 }
 
@@ -52,6 +56,9 @@ body.sidebar-collapsed .app-shell {
   background: rgba(255, 250, 242, 0.84);
   backdrop-filter: blur(16px);
   overflow: hidden;
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
 
 .sidebar-header {
@@ -81,15 +88,21 @@ body.sidebar-collapsed .app-shell {
   align-items: center;
   gap: 10px;
   width: 100%;
+  margin-top: 18px;
 }
 
 .sidebar-main-section {
   flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .sidebar-footer {
   margin-top: auto;
   padding-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .sidebar-toggle {
@@ -103,9 +116,48 @@ body.sidebar-collapsed .app-shell {
   display: inline-flex;
 }
 
+.llama-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.llama-status-label {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.llama-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--line);
+}
+
+.llama-status-dot-loaded {
+  background: var(--accent);
+}
+
+.llama-status-dot-loading {
+  background: #c07a10;
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+.llama-status-dot-unavailable {
+  background: var(--danger);
+}
+
+.llama-status-dot-unknown {
+  background: var(--line);
+}
+
 body.sidebar-collapsed .brand span,
 body.sidebar-collapsed .user-pill,
 body.sidebar-collapsed .sidebar-section,
+body.sidebar-collapsed .llama-status,
 body.sidebar-collapsed .sidebar-settings-link {
   display: none;
 }
@@ -218,6 +270,7 @@ button:disabled {
   padding: 32px;
   display: grid;
   gap: 24px;
+  min-width: 0;
 }
 
 .card {
@@ -241,6 +294,14 @@ button:disabled {
 
 .hero-compact {
   align-items: center;
+}
+
+.hero-full {
+  grid-template-columns: 1fr;
+}
+
+.search-form-inline {
+  max-width: 640px;
 }
 
 .hero-home {
@@ -324,11 +385,13 @@ textarea {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 18px;
+  min-width: 0;
 }
 
 .section-block {
   display: grid;
   gap: 18px;
+  min-width: 0;
 }
 
 .engine-status-line {
@@ -376,6 +439,18 @@ textarea {
   justify-content: space-between;
   align-items: end;
   gap: 16px;
+}
+
+.section-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.section-header-actions .ghost-button {
+  padding: 7px 14px;
+  font-size: 0.85rem;
 }
 
 .section-header-inline {
@@ -519,6 +594,45 @@ textarea {
   color: var(--danger);
   border-color: rgba(141, 59, 47, 0.24);
   background: rgba(141, 59, 47, 0.08);
+}
+
+.result-status-dot {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.result-status-dot-pending {
+  background: var(--line);
+}
+
+.result-status-dot-fetching,
+.result-status-dot-cleaning,
+.result-status-dot-summarizing {
+  background: var(--accent);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+.result-status-dot-ready {
+  background: var(--accent);
+}
+
+.result-status-dot-skipped {
+  background: var(--line);
+  opacity: 0.5;
+}
+
+.result-status-dot-error {
+  background: var(--danger);
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.75); }
 }
 
 .summary-status-detail {
@@ -747,6 +861,13 @@ textarea {
 .current-model {
   margin-top: 8px;
   font-family: "IBM Plex Mono", monospace;
+}
+
+.model-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
 }
 
 @media (max-width: 960px) {

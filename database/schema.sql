@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS user_memory (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_timestamp ON messages(conversation_id, timestamp ASC);
 CREATE INDEX IF NOT EXISTS idx_search_results_conversation_rank ON search_results(conversation_id, rank ASC);

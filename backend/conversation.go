@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -154,8 +155,14 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleConversationResults(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "summaries" && r.Method == http.MethodGet:
 		app.handleConversationSummaries(w, r, conversationID)
+	case len(parts) == 3 && parts[1] == "summaries" && parts[2] == "regenerate" && r.Method == http.MethodPost:
+		app.handleConversationRegenerateSummaries(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "messages" && r.Method == http.MethodGet:
+		app.handleConversationMessagesGet(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "messages" && r.Method == http.MethodPost:
 		app.handleConversationMessage(w, r, conversationID)
+	case len(parts) == 3 && parts[1] == "messages" && parts[2] == "stream" && r.Method == http.MethodPost:
+		app.handleConversationMessageStream(w, r, conversationID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -208,6 +215,151 @@ func (app *App) handleConversationResults(w http.ResponseWriter, r *http.Request
 		return
 	}
 	app.renderTemplate(w, "search_results", conversation)
+}
+
+func (app *App) handleConversationMessagesGet(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load messages", http.StatusInternalServerError)
+		return
+	}
+	app.renderTemplate(w, "chat_messages", conversation)
+}
+
+func (app *App) handleConversationRegenerateSummaries(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+
+	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+
+	if err := app.conversations.ResetSummaries(r.Context(), conversationID); err != nil {
+		http.Error(w, "failed to reset summaries", http.StatusInternalServerError)
+		return
+	}
+
+	loggerWithMeta(r.Context(), app.logger, conversationID).Info("summary_regeneration_requested")
+
+	urls := make([]string, 0, len(conversation.SearchResults))
+	for _, result := range conversation.SearchResults {
+		urls = append(urls, result.URL)
+	}
+	app.fetch.Invalidate(urls)
+
+	app.summaryJobs <- SummaryJob{
+		ConversationID: conversationID,
+		UserID:         meta.UserID,
+		Query:          conversation.Title,
+		Results:        conversation.SearchResults,
+		ForceFull:      true,
+	}
+
+	if r.Header.Get("HX-Request") == "true" {
+		updated, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+		if err != nil {
+			http.Error(w, "failed to reload summaries", http.StatusInternalServerError)
+			return
+		}
+		app.renderTemplate(w, "summaries", updated)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/conversations/%d", conversationID), http.StatusSeeOther)
+}
+
+func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	message := strings.TrimSpace(r.FormValue("message"))
+	if message == "" {
+		http.Error(w, "message is required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID); err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+
+	if err := app.conversations.AddMessage(r.Context(), conversationID, "user", message); err != nil {
+		http.Error(w, "failed to store message", http.StatusInternalServerError)
+		return
+	}
+
+	memorySummary, err := app.memory.GetUserMemory(r.Context(), meta.UserID)
+	if err != nil {
+		http.Error(w, "failed to load user memory", http.StatusInternalServerError)
+		return
+	}
+
+	history, err := app.conversations.GetMessageHistory(r.Context(), meta.UserID, conversationID, app.cfg.MaxChatMessages)
+	if err != nil {
+		http.Error(w, "failed to build prompt", http.StatusInternalServerError)
+		return
+	}
+
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars)
+	if err != nil {
+		http.Error(w, "failed to build search context", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	writeEvent := func(event, data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		fl.Flush()
+	}
+
+	replyMeta := RequestMeta{
+		RequestID:      meta.RequestID,
+		UserID:         meta.UserID,
+		ConversationID: conversationID,
+	}
+
+	reply, err := app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
+		encoded, _ := json.Marshal(token)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	})
+
+	if err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat generation failed", "error", err)
+		failureMessage := chatFailureMessage(err)
+		_ = app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage)
+		writeEvent("error", failureMessage)
+		return
+	}
+
+	if err := app.conversations.AddMessage(r.Context(), conversationID, "assistant", reply); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store streamed reply", "error", err)
+	}
+
+	go app.memory.MaybeRefreshUserMemory(RequestMeta{
+		RequestID:      newRequestID(),
+		UserID:         meta.UserID,
+		ConversationID: conversationID,
+	}, meta.UserID, conversationID)
+
+	writeEvent("done", "")
 }
 
 func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -548,6 +700,43 @@ func (service *ConversationService) GetConversationView(ctx context.Context, use
 	return conversation, nil
 }
 
+func (service *ConversationService) ResetSummaries(ctx context.Context, conversationID int64) error {
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE summaries
+		SET summary = '', source_text = '', status = 'pending', status_detail = '', updated_at = CURRENT_TIMESTAMP
+		WHERE conversation_id = ?
+	`, conversationID); err != nil {
+		return err
+	}
+
+	// Delete the overview message (first assistant message)
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE id = (
+			SELECT id FROM messages
+			WHERE conversation_id = ? AND role = 'assistant'
+			ORDER BY timestamp ASC, id ASC
+			LIMIT 1
+		)
+	`, conversationID); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, conversationID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func (service *ConversationService) GetSearchResults(ctx context.Context, conversationID int64) ([]SearchResult, error) {
 	rows, err := service.db.QueryContext(ctx, `
         SELECT url, title, snippet, rank
@@ -711,6 +900,23 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 	}
 
 	return builder.String(), nil
+}
+
+func (service *ConversationService) GetSetting(ctx context.Context, key, fallback string) string {
+	var value string
+	err := service.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func (service *ConversationService) SetSetting(ctx context.Context, key, value string) error {
+	_, err := service.db.ExecContext(ctx, `
+		INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, key, value)
+	return err
 }
 
 func compactContextText(value string, maxChars int) string {

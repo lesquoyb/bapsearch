@@ -1,0 +1,10 @@
+# Default
+* text=auto
+
+# Shell scripts must always use LF
+*.sh text eol=lf
+
+# Docker files
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+docker-compose*.yml text eol=lf

@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 set -eu
 
 SERVER_BIN="${LLAMA_SERVER_BIN:-}"

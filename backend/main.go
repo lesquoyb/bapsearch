@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -68,6 +69,7 @@ type PageData struct {
 	CurrentModel  string
 	Error         string
 	Status        string
+	Prompts       map[string]string
 }
 
 func main() {
@@ -160,19 +162,19 @@ func main() {
 		"summaryStatusLabel": func(status string) string {
 			switch strings.TrimSpace(status) {
 			case "fetching":
-				return "Téléchargement du contenu en cours"
+				return "Fetching content"
 			case "cleaning":
-				return "Nettoyage du contenu"
+				return "Cleaning content"
 			case "summarizing":
-				return "Résumé en cours"
+				return "Summarizing in progress"
 			case "skipped":
-				return "Résumé ignoré"
+				return "Summary skipped"
 			case "error":
-				return "Erreur"
+				return "Error"
 			case "ready":
-				return "Résumé prêt"
+				return "Summary ready"
 			default:
-				return "Résumé en attente"
+				return "Unknown status"
 			}
 		},
 	}).ParseGlob(cfg.TemplateGlob)
@@ -215,6 +217,7 @@ func main() {
 	}
 
 	app.summarize.StartWorkers(app.summaryJobs, cfg.SummaryWorkers)
+	app.loadPromptsFromDB()
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -242,6 +245,35 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+}
+
+func (app *App) loadPromptsFromDB() {
+	ctx := context.Background()
+	s, sy, c, m := app.conversations.GetSetting(ctx, "prompt_summarize", ""),
+		app.conversations.GetSetting(ctx, "prompt_synthesize", ""),
+		app.conversations.GetSetting(ctx, "prompt_chat", ""),
+		app.conversations.GetSetting(ctx, "prompt_memory", "")
+	app.llm.Prompts.Set(s, sy, c, m)
+}
+
+func (app *App) handlePromptsUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	keys := []string{"prompt_summarize", "prompt_synthesize", "prompt_chat", "prompt_memory"}
+	for _, key := range keys {
+		val := strings.TrimSpace(r.FormValue(key))
+		if err := app.conversations.SetSetting(r.Context(), key, val); err != nil {
+			http.Redirect(w, r, "/models?status=failed+to+save+prompts", http.StatusSeeOther)
+			return
+		}
+	}
+
+	app.loadPromptsFromDB()
+	loggerWithMeta(r.Context(), app.logger, 0).Info("prompts_updated")
+	http.Redirect(w, r, "/models?status=prompts+saved", http.StatusSeeOther)
 }
 
 func friendlySiteName(host string) string {
@@ -316,6 +348,8 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/models", app.handleModelsPage)
 	mux.HandleFunc("/models/select", app.handleModelSelect)
 	mux.HandleFunc("/models/download", app.handleModelDownload)
+	mux.HandleFunc("/models/prompts", app.handlePromptsUpdate)
+	mux.HandleFunc("/llama-status", app.handleLlamaStatus)
 
 	return withMiddlewares(mux, app.logger, app.cfg.AllowAnonymous)
 }
@@ -326,6 +360,53 @@ func (app *App) render(w http.ResponseWriter, name string, data PageData) {
 		app.logger.Error("template rendering failed", "error", err, "template", name)
 		http.Error(w, "template rendering failed", http.StatusInternalServerError)
 	}
+}
+
+func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	parsed, err := url.Parse(app.cfg.LlamaURL)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		return
+	}
+	baseURL := parsed.Scheme + "://" + parsed.Host
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+
+	status := "unavailable"
+	switch {
+	case body.Status == "ok":
+		status = "loaded"
+	case strings.Contains(body.Status, "load") || resp.StatusCode == http.StatusServiceUnavailable:
+		status = "loading"
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {

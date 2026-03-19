@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +25,7 @@ type LLMService struct {
 	logger            *slog.Logger
 	maxResponseTokens int
 	contextTokens     int
+	Prompts           LLMPrompts
 }
 
 const (
@@ -30,6 +33,61 @@ const (
 	promptSafetyMargin     = 160
 	minTrimmableMessageLen = 256
 )
+
+const (
+	DefaultPromptSummarize = `You are bap-search, a search assistant running on a small self-hosted machine.
+Produce a concise factual summary of the extracted page.
+Focus on facts useful for answering the user's query.
+Return plain text with 3 short bullet points and one short concluding sentence.`
+
+	DefaultPromptSynthesize = `You are bap-search, a conversational search engine.
+You receive article summaries that were already generated from individual search results.
+Answer the user's query as directly as the source summaries allow.
+If the summaries do not fully support a conclusion, say what is missing.
+Return plain text markdown with:
+- a short direct answer or synthesis paragraph
+- 3 to 5 concise bullet points grounded in the summaries
+- one short line starting with "Limits:"`
+
+	DefaultPromptChat = `You are bap-search, a conversational search engine.
+Answer using the provided summaries, extracted source text, and conversation history.
+If the context does not support a claim, say that the source material is insufficient.
+Prefer clear, compact answers suitable for follow-up chat.`
+
+	DefaultPromptMemory = `Update the user memory based on the following conversation. Keep it short, factual, and useful for future prompts.`
+)
+
+type LLMPrompts struct {
+	mu         sync.RWMutex
+	Summarize  string
+	Synthesize string
+	Chat       string
+	Memory     string
+}
+
+func (p *LLMPrompts) get(field *string, fallback string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if strings.TrimSpace(*field) == "" {
+		return fallback
+	}
+	return *field
+}
+
+func (p *LLMPrompts) Set(summarize, synthesize, chat, memory string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Summarize = summarize
+	p.Synthesize = synthesize
+	p.Chat = chat
+	p.Memory = memory
+}
+
+func (p *LLMPrompts) GetAll() (summarize, synthesize, chat, memory string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Summarize, p.Synthesize, p.Chat, p.Memory
+}
 
 type llamaChatRequest struct {
 	Model       string       `json:"model,omitempty"`
@@ -44,6 +102,15 @@ type llamaChatResponse struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+	} `json:"choices"`
+}
+
+type llamaStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -121,17 +188,91 @@ func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages 
 	return content, nil
 }
 
+// ChatStream sends a streaming request to llama.cpp and calls onToken for each
+// content delta. It returns the full accumulated response when done.
+func (service *LLMService) ChatStream(ctx context.Context, meta RequestMeta, messages []LLMMessage, maxTokens int, onToken func(string)) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = service.maxResponseTokens
+	}
+
+	messages = service.fitMessagesToContext(messages, maxTokens)
+
+	payload := llamaChatRequest{
+		Model:       "local",
+		Messages:    messages,
+		Temperature: 0.2,
+		MaxTokens:   maxTokens,
+		Stream:      true,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, service.baseURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := service.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		errBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	var builder strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var chunk llamaStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		token := chunk.Choices[0].Delta.Content
+		if token == "" {
+			continue
+		}
+		builder.WriteString(token)
+		onToken(token)
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		return builder.String(), err
+	}
+
+	result := strings.TrimSpace(builder.String())
+	service.logger.Info("llm_stream_response",
+		"request_id", meta.RequestID,
+		"user_id", meta.UserID,
+		"conversation_id", meta.ConversationID,
+		"chars", len(result),
+	)
+	return result, nil
+}
+
 func (service *LLMService) SummarizePage(ctx context.Context, meta RequestMeta, query, memory, url, text string) (string, error) {
 	text = service.truncateForPrompt(text, 3600)
 
+	prompt := service.Prompts.get(&service.Prompts.Summarize, DefaultPromptSummarize)
 	messages := []LLMMessage{
-		{
-			Role: "system",
-			Content: strings.TrimSpace(`You are bap-search, a search assistant running on a small self-hosted machine.
-Produce a concise factual summary of the extracted page.
-Focus on facts useful for answering the user's query.
-Return plain text with 3 short bullet points and one short concluding sentence.`),
-		},
+		{Role: "system", Content: strings.TrimSpace(prompt)},
 	}
 
 	if memory != "" {
@@ -161,15 +302,8 @@ func (service *LLMService) SynthesizeSearchAnswer(ctx context.Context, meta Requ
 
 	messages := []LLMMessage{
 		{
-			Role: "system",
-			Content: strings.TrimSpace(`You are bap-search, a conversational search engine.
-You receive article summaries that were already generated from individual search results.
-Answer the user's query as directly as the source summaries allow.
-If the summaries do not fully support a conclusion, say what is missing.
-Return plain text markdown with:
-- a short direct answer or synthesis paragraph
-- 3 to 5 concise bullet points grounded in the summaries
-- one short line starting with "Limits:"`),
+			Role:    "system",
+			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Synthesize, DefaultPromptSynthesize)),
 		},
 		{
 			Role:    "user",
@@ -183,11 +317,8 @@ Return plain text markdown with:
 func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, error) {
 	messages := []LLMMessage{
 		{
-			Role: "system",
-			Content: strings.TrimSpace(`You are bap-search, a conversational search engine.
-Answer using the provided summaries, extracted source text, and conversation history.
-If the context does not support a claim, say that the source material is insufficient.
-Prefer clear, compact answers suitable for follow-up chat.`),
+			Role:    "system",
+			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
 		},
 	}
 
@@ -202,11 +333,30 @@ Prefer clear, compact answers suitable for follow-up chat.`),
 	return service.Chat(ctx, meta, messages, service.maxResponseTokens)
 }
 
+func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onToken func(string)) (string, error) {
+	messages := []LLMMessage{
+		{
+			Role:    "system",
+			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+		},
+	}
+
+	if userMemory != "" {
+		messages = append(messages, LLMMessage{Role: "system", Content: "Persistent user memory: " + userMemory})
+	}
+	if searchContext != "" {
+		messages = append(messages, LLMMessage{Role: "system", Content: "Search context:\n" + searchContext})
+	}
+
+	messages = append(messages, history...)
+	return service.ChatStream(ctx, meta, messages, service.maxResponseTokens, onToken)
+}
+
 func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMeta, currentMemory, transcript string) (string, error) {
 	messages := []LLMMessage{
 		{
 			Role:    "system",
-			Content: "Update the user memory based on the following conversation. Keep it short, factual, and useful for future prompts.",
+			Content: service.Prompts.get(&service.Prompts.Memory, DefaultPromptMemory),
 		},
 	}
 

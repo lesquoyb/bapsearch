@@ -186,3 +186,12 @@ func (service *FetchService) cachePut(url, text string) {
 	defer service.cache.mu.Unlock()
 	service.cache.items[url] = cachedPage{text: text, expiresAt: time.Now().Add(30 * time.Minute)}
 }
+
+func (service *FetchService) Invalidate(urls []string) {
+	service.cache.mu.Lock()
+	defer service.cache.mu.Unlock()
+
+	for _, url := range urls {
+		delete(service.cache.items, url)
+	}
+}

@@ -174,7 +174,7 @@ services:
 
   llama:
     image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
-    restart: unless-stopped
+    restart: always
     environment:
       MODEL_DIR: /models
       CURRENT_MODEL_FILE: /models/current-model.txt
@@ -202,6 +202,9 @@ services:
     environment:
       BASE_URL: http://searxng:8080/
       INSTANCE_NAME: bap-search
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./searxng-settings.yml:/etc/searxng/settings.yml
     healthcheck:
