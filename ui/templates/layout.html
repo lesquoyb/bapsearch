@@ -464,7 +464,7 @@
   {{ range .Messages }}
   <article class="message message-{{ .Role }}">
     <div class="message-role">{{ .Role }}</div>
-    <div class="message-body markdown-body">{{ markdown .Content }}</div>
+    <div class="message-body markdown-body">{{ if eq .Role "assistant" }}{{ markdownWithSources .Content $ }}{{ else }}{{ markdown .Content }}{{ end }}</div>
   </article>
   {{ end }}
 </div>

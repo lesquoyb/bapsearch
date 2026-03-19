@@ -111,6 +111,9 @@ func main() {
 		"markdown": func(value string) template.HTML {
 			return renderMarkdown(value)
 		},
+		"markdownWithSources": func(value string, conversation ConversationView) template.HTML {
+			return renderMarkdownWithSources(value, conversation)
+		},
 		"siteName": func(rawURL string) string {
 			parsed, err := url.Parse(strings.TrimSpace(rawURL))
 			if err != nil {

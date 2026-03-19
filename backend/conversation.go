@@ -1152,6 +1152,9 @@ func (service *ConversationService) GetMessageHistory(ctx context.Context, userI
 
 	history := make([]LLMMessage, 0, len(messages))
 	for _, message := range messages {
+		if message.Role != "user" && message.Role != "assistant" {
+			continue
+		}
 		history = append(history, LLMMessage{Role: message.Role, Content: message.Content})
 	}
 	return history, nil

@@ -112,13 +112,16 @@ type llamaChatRequest struct {
 	Messages    []LLMMessage `json:"messages"`
 	Temperature float64      `json:"temperature,omitempty"`
 	MaxTokens   int          `json:"max_tokens,omitempty"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+	ReasoningBudget    *int           `json:"reasoning_budget,omitempty"`
 	Stream      bool         `json:"stream"`
 }
 
 type llamaChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -126,7 +129,8 @@ type llamaChatResponse struct {
 type llamaStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -154,14 +158,7 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 	}
 
 	messages = service.fitMessagesToContext(messages, maxTokens)
-
-	payload := llamaChatRequest{
-		Model:       "local",
-		Messages:    messages,
-		Temperature: 0.2,
-		MaxTokens:   maxTokens,
-		Stream:      false,
-	}
+	payload := newLlamaChatRequest(messages, maxTokens, false)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -215,6 +212,9 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 	}
 
 	content := strings.TrimSpace(payloadResponse.Choices[0].Message.Content)
+	if content == "" && strings.TrimSpace(payloadResponse.Choices[0].Message.ReasoningContent) != "" {
+		return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+	}
 	service.logger.Info("llm_response",
 		"timestamp", time.Now().UTC().Format(time.RFC3339),
 		"request_id", meta.RequestID,
@@ -238,14 +238,7 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 	}
 
 	messages = service.fitMessagesToContext(messages, maxTokens)
-
-	payload := llamaChatRequest{
-		Model:       "local",
-		Messages:    messages,
-		Temperature: 0.2,
-		MaxTokens:   maxTokens,
-		Stream:      true,
-	}
+	payload := newLlamaChatRequest(messages, maxTokens, true)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -274,6 +267,7 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 	}
 
 	var builder strings.Builder
+	var reasoningBuilder strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -293,6 +287,9 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 		}
 		token := chunk.Choices[0].Delta.Content
 		if token == "" {
+			reasoningBuilder.WriteString(chunk.Choices[0].Delta.ReasoningContent)
+		}
+		if token == "" {
 			continue
 		}
 		builder.WriteString(token)
@@ -303,6 +300,9 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 	}
 
 	result := strings.TrimSpace(builder.String())
+	if result == "" && strings.TrimSpace(reasoningBuilder.String()) != "" {
+		return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+	}
 	service.logger.Info("llm_stream_response",
 		"request_id", meta.RequestID,
 		"user_id", meta.UserID,
@@ -314,7 +314,7 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 
 func (service *LLMService) RewriteSearchQuery(ctx context.Context, meta RequestMeta, query string) (string, error) {
 	messages := []LLMMessage{
-		{Role: "system", Content: DefaultPromptRewriteSearch},
+		buildSystemMessage(DefaultPromptRewriteSearch),
 		{Role: "user", Content: query},
 	}
 
@@ -408,7 +408,7 @@ func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Contex
 	}
 
 	messages := []LLMMessage{
-		{Role: "system", Content: DefaultPromptGroundedAnswer},
+		buildSystemMessage(DefaultPromptGroundedAnswer),
 		{Role: "user", Content: fmt.Sprintf("Original user query: %s\nOptimized search query: %s\n\nTop ranked sources:\n\n%s", originalQuery, targetQuery, strings.Join(blocks, "\n\n"))},
 	}
 
@@ -420,16 +420,12 @@ func (service *LLMService) SummarizePage(ctx context.Context, meta RequestMeta, 
 
 	prompt := service.Prompts.get(&service.Prompts.Summarize, DefaultPromptSummarize)
 	messages := []LLMMessage{
-		{Role: "system", Content: strings.TrimSpace(prompt)},
-	}
-
-	if memory != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "User memory: " + memory})
-	}
-
-	messages = append(messages,
+		buildSystemMessage(
+			strings.TrimSpace(prompt),
+			optionalSystemSection("User memory", memory),
+		),
 		LLMMessage{Role: "user", Content: fmt.Sprintf("Original query: %s\nSource URL: %s\n\nExtracted page text:\n%s", query, url, text)},
-	)
+	}
 
 	return service.Chat(ctx, meta, messages, 320)
 }
@@ -449,10 +445,7 @@ func (service *LLMService) SynthesizeSearchAnswer(ctx context.Context, meta Requ
 	}
 
 	messages := []LLMMessage{
-		{
-			Role:    "system",
-			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Synthesize, DefaultPromptSynthesize)),
-		},
+		buildSystemMessage(strings.TrimSpace(service.Prompts.get(&service.Prompts.Synthesize, DefaultPromptSynthesize))),
 		{
 			Role:    "user",
 			Content: fmt.Sprintf("User query: %s\n\nArticle summaries:\n\n%s", query, service.truncateForPrompt(strings.Join(blocks, "\n\n"), 5600)),
@@ -464,17 +457,11 @@ func (service *LLMService) SynthesizeSearchAnswer(ctx context.Context, meta Requ
 
 func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, error) {
 	messages := []LLMMessage{
-		{
-			Role:    "system",
-			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
-		},
-	}
-
-	if userMemory != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "Persistent user memory: " + userMemory})
-	}
-	if searchContext != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "Search context:\n" + searchContext})
+		buildSystemMessage(
+			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+			optionalSystemSection("Persistent user memory", userMemory),
+			optionalSystemSection("Search context", searchContext),
+		),
 	}
 
 	messages = append(messages, history...)
@@ -483,17 +470,11 @@ func (service *LLMService) GenerateConversationReply(ctx context.Context, meta R
 
 func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onToken func(string)) (string, error) {
 	messages := []LLMMessage{
-		{
-			Role:    "system",
-			Content: strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
-		},
-	}
-
-	if userMemory != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "Persistent user memory: " + userMemory})
-	}
-	if searchContext != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "Search context:\n" + searchContext})
+		buildSystemMessage(
+			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+			optionalSystemSection("Persistent user memory", userMemory),
+			optionalSystemSection("Search context", searchContext),
+		),
 	}
 
 	messages = append(messages, history...)
@@ -502,18 +483,54 @@ func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, 
 
 func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMeta, currentMemory, transcript string) (string, error) {
 	messages := []LLMMessage{
-		{
-			Role:    "system",
-			Content: service.Prompts.get(&service.Prompts.Memory, DefaultPromptMemory),
-		},
-	}
-
-	if currentMemory != "" {
-		messages = append(messages, LLMMessage{Role: "system", Content: "Current user memory: " + currentMemory})
+		buildSystemMessage(
+			service.Prompts.get(&service.Prompts.Memory, DefaultPromptMemory),
+			optionalSystemSection("Current user memory", currentMemory),
+		),
 	}
 
 	messages = append(messages, LLMMessage{Role: "user", Content: transcript})
 	return service.Chat(ctx, meta, messages, 220)
+}
+
+func newLlamaChatRequest(messages []LLMMessage, maxTokens int, stream bool) llamaChatRequest {
+	reasoningBudget := 0
+	return llamaChatRequest{
+		Model:               "local",
+		Messages:            messages,
+		Temperature:         0.2,
+		MaxTokens:           maxTokens,
+		ChatTemplateKwargs:  map[string]any{"enable_thinking": false},
+		ReasoningBudget:     &reasoningBudget,
+		Stream:              stream,
+	}
+}
+
+func buildSystemMessage(parts ...string) LLMMessage {
+	sections := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		sections = append(sections, trimmed)
+	}
+
+	return LLMMessage{
+		Role:    "system",
+		Content: strings.Join(sections, "\n\n"),
+	}
+}
+
+func optionalSystemSection(title, body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	if strings.Contains(body, "\n") {
+		return title + ":\n" + body
+	}
+	return title + ": " + body
 }
 
 func (service *LLMService) fitMessagesToContext(messages []LLMMessage, maxTokens int) []LLMMessage {
