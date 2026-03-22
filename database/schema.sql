@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS messages (
     conversation_id INTEGER NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('user', 'system', 'assistant')),
     content TEXT NOT NULL,
+    reasoning TEXT NOT NULL DEFAULT '',
     timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );

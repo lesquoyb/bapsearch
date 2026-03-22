@@ -71,32 +71,35 @@ Response:
 - full page redirect for normal requests
 - chat fragment for HTMX requests
 
-### GET /models
+### GET /settings
 
-Model management page.
+Unified settings page.
 
 Response:
 
 - detected GGUF files
-- currently selected model
-- model select form
+- currently assigned answer, rewrite, and embedding models
+- settings form
+- prompt editors
 - model download form
 
-### POST /models/select
+### POST /settings
 
-Selects the GGUF model to keep loaded in llama.cpp.
+Saves the current settings form.
 
-Form fields:
+Form fields include:
 
-- `model`: file name inside `/models`
+- `llm_model`, `rewrite_model`, `embedding_model`
+- generation and search settings
+- prompt fields
 
 Behavior:
 
-- validates the file exists
-- writes the file name to `/models/current-model.txt`
-- llama.cpp watcher reloads the server if the selected model changes
+- writes model assignments to the role-specific files in `/models`
+- stores the remaining settings in SQLite
+- reloads in-memory prompts from the database
 
-### POST /models/download
+### POST /settings/download
 
 Downloads a GGUF model file into the shared models volume.
 

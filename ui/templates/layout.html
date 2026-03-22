@@ -62,6 +62,145 @@
     bapRenderMath(event.target);
   });
 
+  function bapAutoScrollReasoning(pre) {
+    if (!pre) return;
+    var details = pre.closest('details');
+    if (details && details.open) {
+      pre.scrollTop = pre.scrollHeight;
+    }
+  }
+
+  function bapStartContinuationStream(basePath, url, formData, chatMessages, refreshUrl) {
+    var limitThread = chatMessages.querySelector('.search-limit-thread');
+    if (limitThread) limitThread.remove();
+
+    var aBody = document.createElement('div');
+    aBody.className = 'message-body markdown-body';
+    aBody.textContent = 'Processing...';
+    var aBubble = document.createElement('article');
+    aBubble.className = 'message message-assistant';
+    aBubble.innerHTML = '<div class="message-role">assistant</div>';
+    aBubble.appendChild(aBody);
+    var aThread = document.createElement('div');
+    aThread.className = 'chat-thread';
+    aThread.appendChild(aBubble);
+    chatMessages.appendChild(aThread);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    var aReasoning = null;
+    var reasoningAccumulated = '';
+    var accumulated = '';
+
+    fetch(url, { method: 'POST', body: formData })
+      .then(async function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+
+        while (true) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          buf += decoder.decode(chunk.value, { stream: true });
+          var parts = buf.split('\n\n');
+          buf = parts.pop();
+
+          for (var i = 0; i < parts.length; i++) {
+            var lines = parts[i].split('\n');
+            var evtName = 'message';
+            var dataLine = '';
+            for (var j = 0; j < lines.length; j++) {
+              if (lines[j].startsWith('event: ')) evtName = lines[j].slice(7);
+              else if (lines[j].startsWith('data: ')) dataLine = lines[j].slice(6);
+            }
+
+            if (evtName === 'done') {
+              var html = await fetch(refreshUrl).then(function (r) { return r.text(); });
+              chatMessages.innerHTML = html;
+              bapRenderMath(chatMessages);
+              var spinner = document.getElementById('summary-spinner');
+              if (spinner) spinner.style.display = 'none';
+            } else if (evtName === 'search_limit') {
+              try {
+                var pq = JSON.parse(dataLine);
+                aThread.className = 'chat-thread search-limit-thread';
+                bapShowSearchLimitPrompt(aBody, pq, chatMessages, refreshUrl, basePath);
+              } catch (_) {}
+            } else if (evtName === 'reasoning') {
+              try {
+                var rToken = JSON.parse(dataLine);
+                reasoningAccumulated += rToken;
+                if (!aReasoning) {
+                  var details = document.createElement('details');
+                  details.className = 'reasoning-block';
+                  details.open = true;
+                  details.innerHTML = '<summary>Thinking\u2026</summary>';
+                  var pre = document.createElement('pre');
+                  pre.className = 'reasoning-content';
+                  details.appendChild(pre);
+                  aBubble.insertBefore(details, aBody);
+                  aReasoning = pre;
+                }
+                aReasoning.textContent = reasoningAccumulated;
+                bapAutoScrollReasoning(aReasoning);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+              } catch (_) {}
+            } else if (evtName === 'status') {
+              try {
+                var st = JSON.parse(dataLine);
+                if (!accumulated && st) aBody.textContent = st;
+              } catch (_) {}
+            } else if (evtName === 'error') {
+              try { aBody.textContent = JSON.parse(dataLine); } catch (_) { aBody.textContent = dataLine; }
+              aBubble.className = 'message message-system';
+            } else if (dataLine) {
+              try {
+                accumulated += JSON.parse(dataLine);
+                aBody.textContent = accumulated;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+              } catch (_) {}
+            }
+          }
+        }
+      })
+      .catch(function (err) {
+        aBody.textContent = 'Connection error: ' + err.message;
+      });
+  }
+
+  function bapShowSearchLimitPrompt(targetBody, pendingQuery, chatMessages, refreshUrl, basePath) {
+    targetBody.innerHTML = '';
+    var limitDiv = document.createElement('div');
+    limitDiv.className = 'search-limit-prompt';
+    var p = document.createElement('p');
+    p.textContent = 'I need more information to answer comprehensively. What would you like to do?';
+    limitDiv.appendChild(p);
+
+    var actions = document.createElement('div');
+    actions.className = 'search-limit-actions';
+
+    var continueBtn = document.createElement('button');
+    continueBtn.className = 'search-limit-btn search-limit-continue';
+    continueBtn.textContent = '\uD83D\uDD0D Continue searching';
+    continueBtn.addEventListener('click', function () {
+      var fd = new FormData();
+      fd.append('query', pendingQuery);
+      bapStartContinuationStream(basePath, basePath + '/search-more/stream', fd, chatMessages, refreshUrl);
+    });
+
+    var summarizeBtn = document.createElement('button');
+    summarizeBtn.className = 'search-limit-btn search-limit-summarize';
+    summarizeBtn.textContent = '\uD83D\uDCDD Answer with available info';
+    summarizeBtn.addEventListener('click', function () {
+      bapStartContinuationStream(basePath, basePath + '/force-answer/stream', new FormData(), chatMessages, refreshUrl);
+    });
+
+    actions.appendChild(continueBtn);
+    actions.appendChild(summarizeBtn);
+    limitDiv.appendChild(actions);
+    targetBody.appendChild(limitDiv);
+  }
+
   (function () {
     function scheduleInitialAnswerRetry(anchor, delayMs) {
       if (!anchor || anchor.dataset.complete === 'true') return;
@@ -84,6 +223,9 @@
       var aThread = chatMessages.querySelector('.chat-thread.is-initial-stream');
       var aBubble;
       var aBody;
+      var aReasoning;
+      var reasoningAccumulated = '';
+      var searchLimitPending = false;
       if (!aThread) {
         aBody = document.createElement('div');
         aBody.className = 'message-body markdown-body';
@@ -134,17 +276,47 @@
                 try {
                   var statusText = JSON.parse(dataLine);
                   if (spinnerText && statusText) spinnerText.textContent = statusText;
-                  if (!accumulated && statusText) aBody.textContent = statusText;
+                  if (!accumulated && !reasoningAccumulated && statusText) aBody.textContent = statusText;
+                } catch (_) {}
+              } else if (evtName === 'reasoning') {
+                try {
+                  var rToken = JSON.parse(dataLine);
+                  reasoningAccumulated += rToken;
+                  if (!aReasoning) {
+                    var details = document.createElement('details');
+                    details.className = 'reasoning-block';
+                    details.open = true;
+                    details.innerHTML = '<summary>Thinking…</summary>';
+                    var pre = document.createElement('pre');
+                    pre.className = 'reasoning-content';
+                    details.appendChild(pre);
+                    aBubble.insertBefore(details, aBody);
+                    aReasoning = pre;
+                    aBody.textContent = '';
+                  }
+                  aReasoning.textContent = reasoningAccumulated;
+                  bapAutoScrollReasoning(aReasoning);
+                  chatMessages.scrollTop = chatMessages.scrollHeight;
+                } catch (_) {}
+              } else if (evtName === 'search_limit') {
+                try {
+                  var pendingQuery = JSON.parse(dataLine);
+                  var basePath = anchor.dataset.streamUrl.replace('/answer/stream', '');
+                  aThread.className = 'chat-thread search-limit-thread';
+                  bapShowSearchLimitPrompt(aBody, pendingQuery, chatMessages, anchor.dataset.refreshUrl, basePath);
+                  searchLimitPending = true;
                 } catch (_) {}
               } else if (evtName === 'done') {
                 completed = true;
                 anchor.dataset.complete = 'true';
                 anchor.dataset.enabled = 'false';
-                var html = await fetch(anchor.dataset.refreshUrl).then(function (r) { return r.text(); });
-                chatMessages.innerHTML = html;
-                bapRenderMath(chatMessages);
                 var spinner = document.getElementById('summary-spinner');
                 if (spinner) spinner.style.display = 'none';
+                if (!searchLimitPending) {
+                  var html = await fetch(anchor.dataset.refreshUrl).then(function (r) { return r.text(); });
+                  chatMessages.innerHTML = html;
+                  bapRenderMath(chatMessages);
+                }
               } else if (evtName === 'error') {
                 var errorText = dataLine;
                 try { errorText = JSON.parse(dataLine); } catch (_) {}
@@ -186,6 +358,16 @@
     var form = document.getElementById('chat-form');
     if (!form) return;
 
+    var textarea = form.querySelector('textarea[name="message"]');
+    if (textarea) {
+      textarea.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          form.requestSubmit();
+        }
+      });
+    }
+
     form.addEventListener('submit', async function (e) {
       e.preventDefault();
 
@@ -222,6 +404,10 @@
       chatMessages.appendChild(aThread);
       chatMessages.scrollTop = chatMessages.scrollHeight;
 
+      var aReasoning = null;
+      var reasoningAccumulated = '';
+      var chatSearchLimitPending = false;
+
       textarea.value = '';
 
       var streamURL = form.dataset.streamUrl;
@@ -256,10 +442,39 @@
               else if (lines[j].startsWith('data: ')) dataLine = lines[j].slice(6);
             }
             if (evtName === 'done') {
-              // Replace streaming content with server-rendered markdown
-              var html = await fetch(refreshURL).then(function(r){ return r.text(); });
-              chatMessages.innerHTML = html;
-              bapRenderMath(chatMessages);
+              if (!chatSearchLimitPending) {
+                // Replace streaming content with server-rendered markdown
+                var html = await fetch(refreshURL).then(function(r){ return r.text(); });
+                chatMessages.innerHTML = html;
+                bapRenderMath(chatMessages);
+              }
+            } else if (evtName === 'search_limit') {
+              try {
+                var pendingQuery = JSON.parse(dataLine);
+                var basePath = form.dataset.streamUrl.replace('/messages/stream', '');
+                aThread.className = 'chat-thread search-limit-thread';
+                bapShowSearchLimitPrompt(aBody, pendingQuery, chatMessages, refreshURL, basePath);
+                chatSearchLimitPending = true;
+              } catch(_) {}
+            } else if (evtName === 'reasoning') {
+              try {
+                var rToken = JSON.parse(dataLine);
+                reasoningAccumulated += rToken;
+                if (!aReasoning) {
+                  var details = document.createElement('details');
+                  details.className = 'reasoning-block';
+                  details.open = true;
+                  details.innerHTML = '<summary>Thinking…</summary>';
+                  var pre = document.createElement('pre');
+                  pre.className = 'reasoning-content';
+                  details.appendChild(pre);
+                  aBubble.insertBefore(details, aBody);
+                  aReasoning = pre;
+                }
+                aReasoning.textContent = reasoningAccumulated;
+                bapAutoScrollReasoning(aReasoning);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+              } catch(_) {}
             } else if (evtName === 'error') {
               try { aBody.textContent = JSON.parse(dataLine); } catch(_) { aBody.textContent = dataLine; }
               aBubble.className = 'message message-system';
@@ -337,7 +552,7 @@
 
 {{ define "status_banner" }}
 {{ if .Status }}
-<div class="status-banner">{{ .Status }}</div>
+<div class="toast" role="status">{{ .Status }}</div>
 {{ end }}
 {{ end }}
 
@@ -354,20 +569,27 @@
   </div>
 
   <div class="sidebar-actions">
-    <button class="ghost-button sidebar-toggle" type="button" data-sidebar-toggle aria-expanded="true" aria-label="Toggle conversations sidebar">Toggle conv.</button>
+    <button class="ghost-button sidebar-toggle icon-button" type="button" data-sidebar-toggle aria-expanded="true" aria-label="Toggle conversations sidebar">☰</button>
   </div>
 
-  <div class="user-pill">User: {{ .UserID }}</div>
+  <a class="user-pill" href="/memory" title="View persistent memory">{{ .UserID }}</a>
 
   <div class="sidebar-section sidebar-main-section">
     <h2>Conversations</h2>
     {{ if .Conversations }}
       <nav class="conversation-list">
         {{ range .Conversations }}
-          <a class="conversation-link {{ if $.Conversation }}{{ if eq $.Conversation.ID .ID }}is-active{{ end }}{{ end }}" href="/conversations/{{ .ID }}">
-            <span>{{ .Title }}</span>
-            <small>{{ formatTime .UpdatedAt }}</small>
-          </a>
+          <div class="conversation-item {{ if $.Conversation }}{{ if eq $.Conversation.ID .ID }}is-active{{ end }}{{ end }}">
+            <div class="conversation-link-shell {{ if $.Conversation }}{{ if eq $.Conversation.ID .ID }}is-active{{ end }}{{ end }}">
+              <a class="conversation-link {{ if $.Conversation }}{{ if eq $.Conversation.ID .ID }}is-active{{ end }}{{ end }}" href="/conversations/{{ .ID }}">
+                <span>{{ .Title }}</span>
+                <small>{{ formatTime .UpdatedAt }}</small>
+              </a>
+              <form class="conversation-inline-action" action="/conversations/{{ .ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');">
+                <button class="ghost-button sidebar-action-button danger-button icon-button" type="submit" title="Delete this conversation" aria-label="Delete conversation">🗑️</button>
+              </form>
+            </div>
+          </div>
         {{ end }}
       </nav>
     {{ else }}
@@ -380,7 +602,7 @@
       <span class="llama-status-dot llama-status-dot-unknown"></span>
       <span class="llama-status-label">Checking...</span>
     </div>
-    <a class="ghost-button sidebar-settings-link" href="/models">Settings</a>
+    <a class="ghost-button sidebar-settings-link icon-button" href="/settings" aria-label="Settings" title="Settings">⚙️</a>
   </div>
 </aside>
 {{ end }}
@@ -390,7 +612,7 @@
 <div class="results-grid">
   {{ range .SearchResults }}
   {{ $summary := index $.SummaryLookup .URL }}
-  <article class="card result-card">
+  <article class="card result-card{{ if eq .QueryVariant "rewritten" }} result-card--rewritten{{ end }}" data-variant="{{ .QueryVariant }}">
     <span class="result-status-dot result-status-dot-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ else }}title="{{ summaryStatusLabel $summary.Status }}"{{ end }}></span>
     <div class="result-card-topline">
       <div class="source-hover" tabindex="0">
@@ -398,8 +620,6 @@
           <img class="source-favicon" src="{{ faviconURL .URL }}" alt="" loading="lazy">
           <div class="source-hover-trigger">
           <span class="eyebrow source-hover-label">{{ siteName .URL }}</span>
-          {{ if .QueryVariant }}<span class="eyebrow">{{ .QueryVariant }}</span>{{ end }}
-          {{ if gt $summary.RerankPosition 0 }}<span class="eyebrow">rank {{ $summary.RerankPosition }}</span>{{ end }}
           </div>
         </div>
         <div class="source-summary-popover" role="dialog" aria-label="Summary preview for {{ siteName .URL }}">
@@ -464,6 +684,12 @@
   {{ range .Messages }}
   <article class="message message-{{ .Role }}">
     <div class="message-role">{{ .Role }}</div>
+    {{ if .Reasoning }}
+    <details class="reasoning-block">
+      <summary>Thinking…</summary>
+      <pre class="reasoning-content">{{ .Reasoning }}</pre>
+    </details>
+    {{ end }}
     <div class="message-body markdown-body">{{ if eq .Role "assistant" }}{{ markdownWithSources .Content $ }}{{ else }}{{ markdown .Content }}{{ end }}</div>
   </article>
   {{ end }}

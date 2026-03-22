@@ -21,85 +21,6 @@ const (
 	modelRoleEmbeddings = "embeddings"
 )
 
-func (app *App) handleModelsPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	meta := requestMetaFromContext(r.Context())
-	conversations, err := app.conversations.ListConversations(r.Context(), meta.UserID)
-	if err != nil {
-		http.Error(w, "failed to load conversations", http.StatusInternalServerError)
-		return
-	}
-
-	models, err := app.listModels()
-	if err != nil {
-		http.Error(w, "failed to list models", http.StatusInternalServerError)
-		return
-	}
-
-	s, sy, c, m := app.llm.Prompts.GetAll()
-	if strings.TrimSpace(s) == "" {
-		s = DefaultPromptSummarize
-	}
-	if strings.TrimSpace(sy) == "" {
-		sy = DefaultPromptSynthesize
-	}
-	if strings.TrimSpace(c) == "" {
-		c = DefaultPromptChat
-	}
-	if strings.TrimSpace(m) == "" {
-		m = DefaultPromptMemory
-	}
-
-	app.render(w, "models", PageData{
-		AppName:        "bap-search",
-		UserID:         meta.UserID,
-		Conversations:  conversations,
-		Models:         models,
-		CurrentModel:   app.currentModelName(),
-		RewriteModel:   app.currentModelNameForRole(modelRoleRewrite),
-		EmbeddingModel: app.currentModelNameForRole(modelRoleEmbeddings),
-		Status:         r.URL.Query().Get("status"),
-		Prompts: map[string]string{
-			"prompt_summarize":  s,
-			"prompt_synthesize": sy,
-			"prompt_chat":       c,
-			"prompt_memory":     m,
-		},
-	})
-}
-
-func (app *App) handleModelSelect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	role := normalizeModelRole(r.FormValue("role"))
-	model := strings.TrimSpace(r.FormValue("model"))
-	if model == "" {
-		http.Redirect(w, r, "/models?status=missing+model", http.StatusSeeOther)
-		return
-	}
-
-	candidate := filepath.Join(app.cfg.ModelsDir, model)
-	if _, err := os.Stat(candidate); err != nil {
-		http.Redirect(w, r, "/models?status=unknown+model", http.StatusSeeOther)
-		return
-	}
-
-	if err := os.WriteFile(app.modelPathForRole(role), []byte(model), 0o644); err != nil {
-		http.Redirect(w, r, "/models?status=failed+to+select+model", http.StatusSeeOther)
-		return
-	}
-
-	loggerWithMeta(r.Context(), app.logger, 0).Info("model_selected", "role", role, "model", model)
-	http.Redirect(w, r, "/models?status=model+selection+saved", http.StatusSeeOther)
-}
-
 func (app *App) handleModelDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -108,31 +29,31 @@ func (app *App) handleModelDownload(w http.ResponseWriter, r *http.Request) {
 
 	modelURL := strings.TrimSpace(r.FormValue("url"))
 	if modelURL == "" {
-		http.Redirect(w, r, "/models?status=missing+url", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=missing+url", http.StatusSeeOther)
 		return
 	}
 
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, modelURL, nil)
 	if err != nil {
-		http.Redirect(w, r, "/models?status=download+failed", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=download+failed", http.StatusSeeOther)
 		return
 	}
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		http.Redirect(w, r, "/models?status=download+failed", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=download+failed", http.StatusSeeOther)
 		return
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode >= http.StatusBadRequest {
-		http.Redirect(w, r, "/models?status=download+failed", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=download+failed", http.StatusSeeOther)
 		return
 	}
 
 	filename := filepath.Base(response.Request.URL.Path)
 	if !strings.HasSuffix(strings.ToLower(filename), ".gguf") {
-		http.Redirect(w, r, "/models?status=only+.gguf+files+are+accepted", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=only+.gguf+files+are+accepted", http.StatusSeeOther)
 		return
 	}
 
@@ -141,26 +62,26 @@ func (app *App) handleModelDownload(w http.ResponseWriter, r *http.Request) {
 
 	file, err := os.Create(tempDestination)
 	if err != nil {
-		http.Redirect(w, r, "/models?status=failed+to+write+model", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=failed+to+write+model", http.StatusSeeOther)
 		return
 	}
 
 	if _, err := io.Copy(file, response.Body); err != nil {
 		file.Close()
 		os.Remove(tempDestination)
-		http.Redirect(w, r, "/models?status=download+failed", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=download+failed", http.StatusSeeOther)
 		return
 	}
 	file.Close()
 
 	if err := os.Rename(tempDestination, destination); err != nil {
 		os.Remove(tempDestination)
-		http.Redirect(w, r, "/models?status=failed+to+publish+model", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?status=failed+to+publish+model", http.StatusSeeOther)
 		return
 	}
 
 	loggerWithMeta(r.Context(), app.logger, 0).Info("model_downloaded", "url", modelURL, "filename", filename)
-	http.Redirect(w, r, "/models?status=model+downloaded", http.StatusSeeOther)
+	http.Redirect(w, r, "/settings?status=model+downloaded", http.StatusSeeOther)
 }
 
 func (app *App) listModels() ([]ModelInfo, error) {

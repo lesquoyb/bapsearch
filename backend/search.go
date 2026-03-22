@@ -14,10 +14,10 @@ import (
 )
 
 type SearchResult struct {
-	URL     string
-	Title   string
-	Snippet string
-	Rank    int
+	URL          string
+	Title        string
+	Snippet      string
+	Rank         int
 	QueryVariant string
 }
 

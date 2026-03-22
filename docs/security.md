@@ -22,7 +22,7 @@
 
 - Only `.gguf` downloads are accepted by the UI.
 - Model downloads use a temporary file and atomic rename.
-- Model selection is file-based and explicit through `/models/current-model.txt`.
+- Model assignment is file-based and explicit through the role-specific files in `/models`.
 
 ## Resource safety
 

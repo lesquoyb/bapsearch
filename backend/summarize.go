@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 )
 
@@ -267,43 +266,7 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 }
 
 func (service *SummarizeService) rankSources(ctx context.Context, logger *slog.Logger, conversationID int64, queryEmbedding []float64) ([]RankedSource, error) {
-	sources, err := service.conversations.ListRankedSources(ctx, conversationID)
-	if err != nil {
-		return nil, err
-	}
-
-	ranked := make([]RankedSource, 0, len(sources))
-	for _, source := range sources {
-		if strings.TrimSpace(source.EmbeddingJSON) == "" || strings.TrimSpace(source.SourceText) == "" {
-			continue
-		}
-
-		var embedding []float64
-		if err := json.Unmarshal([]byte(source.EmbeddingJSON), &embedding); err != nil {
-			logger.Error("embedding deserialization failed", "url", source.URL, "error", err)
-			continue
-		}
-
-		source.SimilarityScore = cosineSimilarity(queryEmbedding, embedding)
-		ranked = append(ranked, source)
-	}
-
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].SimilarityScore == ranked[j].SimilarityScore {
-			return ranked[i].URL < ranked[j].URL
-		}
-		return ranked[i].SimilarityScore > ranked[j].SimilarityScore
-	})
-
-	for index := range ranked {
-		position := index + 1
-		ranked[index].RerankPosition = position
-		if err := service.conversations.UpdateDocumentRanking(ctx, conversationID, ranked[index].URL, ranked[index].SimilarityScore, position); err != nil {
-			return nil, err
-		}
-	}
-
-	return ranked, nil
+	return service.conversations.RerankAllSources(ctx, logger, conversationID, queryEmbedding)
 }
 
 func (service *SummarizeService) failPipeline(ctx context.Context, logger *slog.Logger, conversationID int64, err error) {

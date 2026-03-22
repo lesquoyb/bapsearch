@@ -24,8 +24,8 @@
 ### llama
 
 - llama.cpp server container.
-- Loads the selected GGUF model from `/models/current-model.txt`.
-- Watches the selected model file and restarts the inference process when the selected model changes.
+- Loads the selected GGUF model from the role-specific files in `/models`.
+- Watches the selected model file and restarts the inference process when the assigned model changes.
 
 ## Search workflow
 
@@ -67,7 +67,7 @@
 - [backend/memory.go](../backend/memory.go): persistent memory refresh
 - [backend/logging.go](../backend/logging.go): JSON logging and request context
 - [backend/llm.go](../backend/llm.go): llama.cpp chat integration
-- [backend/models.go](../backend/models.go): model detection, selection, download
+- [backend/models.go](../backend/models.go): model discovery, role assignment helpers, and download
 
 ## Database schema
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"net/http"
 	"strings"
 )
 
@@ -71,4 +72,34 @@ func (service *MemoryService) MaybeRefreshUserMemory(meta RequestMeta, userID st
 	}
 
 	loggerWithMeta(ctx, service.logger, conversationID).Info("user_memory_updated")
+}
+
+func (app *App) handleMemoryPage(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	meta := requestMetaFromContext(ctx)
+	conversations, _ := app.conversations.ListConversations(ctx, meta.UserID)
+
+	if r.Method == http.MethodPost {
+		newMemory := strings.TrimSpace(r.FormValue("memory"))
+		if err := app.memory.UpsertUserMemory(ctx, meta.UserID, newMemory); err != nil {
+			app.logger.Error("failed to save user memory", "error", err)
+			http.Redirect(w, r, "/memory?status=error", http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/memory?status=saved", http.StatusSeeOther)
+		return
+	}
+
+	memory, err := app.memory.GetUserMemory(ctx, meta.UserID)
+	if err != nil {
+		app.logger.Error("failed to load user memory", "error", err)
+	}
+
+	app.render(w, "memory", PageData{
+		AppName:       "bap-search",
+		UserID:        meta.UserID,
+		Conversations: conversations,
+		UserMemory:    memory,
+		Status:        r.URL.Query().Get("status"),
+	})
 }

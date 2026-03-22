@@ -1,0 +1,291 @@
+{{ define "settings" }}
+{{ template "head" . }}
+<div class="app-shell">
+  {{ template "conversation_sidebar" . }}
+  <main class="content">
+    {{ template "status_banner" . }}
+    <section class="hero card hero-compact">
+      <div>
+        <div class="eyebrow">Settings</div>
+        <h1>Algorithm, search &amp; model parameters</h1>
+        <p>Fine-tune bap-search behavior. Changes are applied immediately.</p>
+      </div>
+    </section>
+
+    <form class="stack-form" action="/settings" method="post">
+      <!-- Models -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Model assignment</div>
+          <h2>Choose which model handles each role</h2>
+        </div></div>
+        <article class="card">
+          <label for="llm_model">Answer model</label>
+          <p class="muted">The main model used to generate search answers and conversation replies.</p>
+          <select id="llm_model" name="llm_model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if eq .Name $.CurrentModel }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No model found</option>
+            {{ end }}
+          </select>
+          <label for="rewrite_model">Rewrite model</label>
+          <p class="muted">Used to rewrite user queries into optimized search terms. Can be a smaller, faster model.</p>
+          <select id="rewrite_model" name="rewrite_model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if eq .Name $.RewriteModel }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No model found</option>
+            {{ end }}
+          </select>
+          <label for="embedding_model">Embedding model</label>
+          <p class="muted">Generates vector embeddings to rank search results by semantic similarity to your query.</p>
+          <select id="embedding_model" name="embedding_model">
+            {{ range .Models }}
+              <option value="{{ .Name }}" {{ if eq .Name $.EmbeddingModel }}selected{{ end }}>{{ .Name }}</option>
+            {{ else }}
+              <option value="">No model found</option>
+            {{ end }}
+          </select>
+        </article>
+      </section>
+
+      <!-- LLM parameters -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">LLM parameters</div>
+          <h2>Sampling and generation</h2>
+        </div></div>
+        <article class="card">
+          <label for="temperature">Temperature</label>
+          <p class="muted">Controls randomness. Lower values (e.g. 0.1) produce focused, deterministic answers. Higher values (e.g. 1.0) make output more creative and varied.</p>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="2" id="temperature" name="temperature" value="{{ index .Settings "temperature" }}" data-default="0.2">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="top_p">Top-p (nucleus sampling)</label>
+          <p class="muted">Only considers tokens whose cumulative probability reaches this threshold. 1.0 = consider all tokens. Lower values (e.g. 0.9) cut unlikely tokens for more coherent output.</p>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="1" id="top_p" name="top_p" value="{{ index .Settings "top_p" }}" data-default="1.0">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="top_k">Top-k</label>
+          <p class="muted">Limits the model to choosing among the top K most likely tokens at each step. Lower values reduce randomness; 40 is a good default.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="100" id="top_k" name="top_k" value="{{ index .Settings "top_k" }}" data-default="40">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="max_tokens">Max response tokens</label>
+          <p class="muted">Maximum number of tokens the model can generate for utility tasks (summarization, query rewriting). Conversation answers are unlimited and stop naturally. Default: 1024.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="32" max="8192" id="max_tokens" name="max_tokens" value="{{ index .Settings "max_tokens" }}" data-default="1024">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- Reasoning / Thinking -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Reasoning</div>
+          <h2>Chain-of-thought thinking</h2>
+        </div></div>
+        <article class="card">
+          <label class="checkbox-label">
+            <input type="checkbox" id="enable_thinking" name="enable_thinking" value="true" {{ if eq (index .Settings "enable_thinking") "true" }}checked{{ end }} data-default="true">
+            Enable reasoning mode
+            <button type="button" class="reset-btn" onclick="resetCheckbox(this)" title="Reset to default">↻</button>
+          </label>
+          <p class="muted">When enabled, the model thinks step-by-step before answering. Produces better results but uses more tokens and takes longer. The reasoning is shown in a collapsible block above the answer. Requires a model that supports thinking (e.g. Qwen3.5).</p>
+
+          <label for="reasoning_budget">Reasoning budget (tokens)</label>
+          <p class="muted">Maximum number of tokens the model can use for its internal chain-of-thought reasoning. Higher values allow deeper thinking but slow down responses. Only used when reasoning mode is enabled.</p>
+          <div class="setting-row">
+            <input type="number" step="256" min="0" max="16384" id="reasoning_budget" name="reasoning_budget" value="{{ index .Settings "reasoning_budget" }}" data-default="2048">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- Search parameters -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Search parameters</div>
+          <h2>Web search and content extraction</h2>
+        </div></div>
+        <article class="card">
+          <label for="search_engine">Search engine</label>
+          <p class="muted">Which search backend to use for web queries. SearXNG is self-hosted and private.</p>
+          <select id="search_engine" name="search_engine">
+            <option value="searxng" {{ if eq (index .Settings "search_engine") "searxng" }}selected{{ end }}>SearXNG</option>
+            <option value="bing" {{ if eq (index .Settings "search_engine") "bing" }}selected{{ end }}>Bing</option>
+            <option value="google" {{ if eq (index .Settings "search_engine") "google" }}selected{{ end }}>Google</option>
+          </select>
+
+          <label for="search_count">Results per search</label>
+          <p class="muted">Number of search results to fetch per query. More results give broader coverage but increase processing time.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="50" id="search_count" name="search_count" value="{{ index .Settings "search_count" }}" data-default="8">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="max_search_loops">Max iterative search loops</label>
+          <p class="muted">How many times the model can issue follow-up searches to refine its answer. When this limit is reached, the user is prompted to continue or stop.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="10" id="max_search_loops" name="max_search_loops" value="{{ index .Settings "max_search_loops" }}" data-default="3">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="summarize_url_limit">URLs to summarize</label>
+          <p class="muted">Maximum number of top-ranked URLs whose content will be fetched and summarized per search. Higher values give richer context but take longer.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="20" id="summarize_url_limit" name="summarize_url_limit" value="{{ index .Settings "summarize_url_limit" }}" data-default="3">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="max_extract_chars">Max chars extracted per page</label>
+          <p class="muted">Character limit for text extracted from each web page. Larger values capture more detail but may exceed the model's context window.</p>
+          <div class="setting-row">
+            <input type="number" step="100" min="1000" max="100000" id="max_extract_chars" name="max_extract_chars" value="{{ index .Settings "max_extract_chars" }}" data-default="12000">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="fetch_workers">Parallel fetch workers</label>
+          <p class="muted">Number of concurrent workers fetching web pages. More workers speed up page retrieval but use more bandwidth and CPU.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="10" id="fetch_workers" name="fetch_workers" value="{{ index .Settings "fetch_workers" }}" data-default="3">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- Embedding / similarity -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Embedding parameters</div>
+          <h2>Similarity filtering</h2>
+        </div></div>
+        <article class="card">
+          <label for="similarity_threshold">Similarity threshold</label>
+          <p class="muted">Minimum cosine similarity score (0–1) for a search result to be considered relevant. Higher values are stricter — only closely matching results are kept. Lower values include more results but may add noise.</p>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="1" id="similarity_threshold" name="similarity_threshold" value="{{ index .Settings "similarity_threshold" }}" data-default="0.5">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- Chat parameters -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Chat parameters</div>
+          <h2>Follow-up conversation limits</h2>
+        </div></div>
+        <article class="card">
+          <label for="chat_context_chars">Context chars for chat</label>
+          <p class="muted">Maximum characters of previous conversation context included when generating a follow-up reply. Larger values give the model more memory but use more of the context window.</p>
+          <div class="setting-row">
+            <input type="number" step="100" min="500" max="50000" id="chat_context_chars" name="chat_context_chars" value="{{ index .Settings "chat_context_chars" }}" data-default="4200">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="max_chat_messages">Max chat messages in context</label>
+          <p class="muted">Maximum number of previous messages to include as context for follow-up replies. Keeps conversations coherent without overloading the model.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="50" id="max_chat_messages" name="max_chat_messages" value="{{ index .Settings "max_chat_messages" }}" data-default="8">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="context_doc_count">Documents in context</label>
+          <p class="muted">Maximum number of top-ranked documents included as context when generating an answer. More documents give the model more material to cite but use more of the context window.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="20" id="context_doc_count" name="context_doc_count" value="{{ index .Settings "context_doc_count" }}" data-default="5">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- Prompts -->
+      <section class="section-block">
+        <div class="section-header"><div>
+          <div class="eyebrow">Prompt engineering</div>
+          <h2>System prompts</h2>
+        </div></div>
+        <article class="card">
+          <div class="eyebrow">Article summarization</div>
+          <p class="muted">Used to summarize each search result page.</p>
+          <textarea name="prompt_summarize" rows="6">{{ index .Prompts "prompt_summarize" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">Global synthesis</div>
+          <p class="muted">Used to generate the final answer from all summaries.</p>
+          <textarea name="prompt_synthesize" rows="8">{{ index .Prompts "prompt_synthesize" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">Chat replies</div>
+          <p class="muted">Used to answer follow-up questions in the conversation.</p>
+          <textarea name="prompt_chat" rows="6">{{ index .Prompts "prompt_chat" }}</textarea>
+        </article>
+        <article class="card">
+          <div class="eyebrow">User memory</div>
+          <p class="muted">Used to update persistent user memory after each conversation.</p>
+          <textarea name="prompt_memory" rows="3">{{ index .Prompts "prompt_memory" }}</textarea>
+        </article>
+      </section>
+
+      <div>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+
+    <!-- Model management (separate, not part of the settings form) -->
+    <section class="section-block">
+      <div class="section-header"><div>
+        <div class="eyebrow">Model management</div>
+        <h2>Detected GGUF models</h2>
+      </div></div>
+      <div class="results-grid">
+        {{ range .Models }}
+        <article class="card result-card">
+          <h3>{{ .Name }}</h3>
+          <p>{{ .Path }}</p>
+          {{ if eq .Name $.CurrentModel }}<div class="user-pill">Answer</div>{{ end }}
+          {{ if eq .Name $.RewriteModel }}<div class="user-pill">Rewrite</div>{{ end }}
+          {{ if eq .Name $.EmbeddingModel }}<div class="user-pill">Embeddings</div>{{ end }}
+        </article>
+        {{ else }}
+        <article class="card result-card">
+          <p>No GGUF files detected in the models volume.</p>
+        </article>
+        {{ end }}
+      </div>
+      <div class="section-header"><div>
+        <div class="eyebrow">Download a model</div>
+      </div></div>
+      <form class="stack-form" action="/settings/download" method="post">
+        <label for="url">Direct GGUF URL</label>
+        <input id="url" name="url" type="url" placeholder="https://huggingface.co/.../model.gguf">
+        <button type="submit">Download</button>
+      </form>
+    </section>
+  </main>
+</div>
+<script>
+function resetField(btn) {
+  var input = btn.parentElement.querySelector('input');
+  if (input && input.dataset.default !== undefined) {
+    input.value = input.dataset.default;
+  }
+}
+function resetCheckbox(btn) {
+  var input = btn.parentElement.querySelector('input[type="checkbox"]');
+  if (input && input.dataset.default !== undefined) {
+    input.checked = input.dataset.default === 'true';
+  }
+}
+</script>
+{{ template "footer" . }}
+{{ end }}

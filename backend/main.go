@@ -41,6 +41,7 @@ type Config struct {
 	FetchWorkers         int
 	SummaryWorkers       int
 	SummaryQueueSize     int
+	ContextDocCount      int
 	ChatContextChars     int
 	MaxChatMessages      int
 	LLMMaxResponseTokens int
@@ -75,6 +76,8 @@ type PageData struct {
 	Error          string
 	Status         string
 	Prompts        map[string]string
+	Settings       map[string]string // <-- expose all settings for the template
+	UserMemory     string
 }
 
 func main() {
@@ -215,6 +218,11 @@ func main() {
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
 		maxEmbeddingChars: cfg.MaxEmbeddingChars,
+		enableThinking:    true,
+		reasoningBudget:   2048,
+		temperature:       0.2,
+		topP:              1.0,
+		topK:              40,
 	}
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
@@ -244,6 +252,7 @@ func main() {
 
 	app.summarize.StartWorkers(app.summaryJobs, cfg.SummaryWorkers)
 	app.loadPromptsFromDB()
+	app.loadSettingsFromDB()
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -282,24 +291,52 @@ func (app *App) loadPromptsFromDB() {
 	app.llm.Prompts.Set(s, sy, c, m)
 }
 
-func (app *App) handlePromptsUpdate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (app *App) loadSettingsFromDB() {
+	ctx := context.Background()
 
-	keys := []string{"prompt_summarize", "prompt_synthesize", "prompt_chat", "prompt_memory"}
-	for _, key := range keys {
-		val := strings.TrimSpace(r.FormValue(key))
-		if err := app.conversations.SetSetting(r.Context(), key, val); err != nil {
-			http.Redirect(w, r, "/models?status=failed+to+save+prompts", http.StatusSeeOther)
-			return
+	if v := app.conversations.GetSetting(ctx, "enable_thinking", ""); v != "" {
+		app.llm.enableThinking = v == "true"
+	}
+	if v := app.conversations.GetSetting(ctx, "reasoning_budget", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			app.llm.reasoningBudget = n
 		}
 	}
-
-	app.loadPromptsFromDB()
-	loggerWithMeta(r.Context(), app.logger, 0).Info("prompts_updated")
-	http.Redirect(w, r, "/models?status=prompts+saved", http.StatusSeeOther)
+	if v := app.conversations.GetSetting(ctx, "temperature", ""); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			app.llm.temperature = f
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "top_p", ""); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			app.llm.topP = f
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "top_k", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			app.llm.topK = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "max_tokens", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.llm.maxResponseTokens = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "context_doc_count", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.ContextDocCount = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "chat_context_chars", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.ChatContextChars = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "max_chat_messages", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.MaxChatMessages = n
+		}
+	}
 }
 
 func friendlySiteName(host string) string {
@@ -371,10 +408,11 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/healthz", app.handleHealth)
 	mux.HandleFunc("/search", app.handleSearch)
 	mux.HandleFunc("/conversations/", app.handleConversationRoutes)
-	mux.HandleFunc("/models", app.handleModelsPage)
-	mux.HandleFunc("/models/select", app.handleModelSelect)
-	mux.HandleFunc("/models/download", app.handleModelDownload)
-	mux.HandleFunc("/models/prompts", app.handlePromptsUpdate)
+	// Route for the unified settings page.
+	mux.HandleFunc("/settings", app.handleSettingsPage)
+	mux.HandleFunc("/settings/save", app.handleSettingsSave)
+	mux.HandleFunc("/settings/download", app.handleModelDownload)
+	mux.HandleFunc("/memory", app.handleMemoryPage)
 	mux.HandleFunc("/llama-status", app.handleLlamaStatus)
 
 	return withMiddlewares(mux, app.logger, app.cfg.AllowAnonymous)
@@ -483,10 +521,11 @@ func loadConfig() Config {
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
+		ContextDocCount:      envOrDefaultInt("BAP_CONTEXT_DOC_COUNT", 5),
 		ChatContextChars:     envOrDefaultInt("BAP_CHAT_CONTEXT_CHARS", 4200),
 		MaxChatMessages:      envOrDefaultInt("BAP_MAX_CHAT_MESSAGES", 8),
 		LLMMaxResponseTokens: envOrDefaultInt("BAP_LLM_MAX_TOKENS", 700),
-		LLMContextTokens:     envOrDefaultInt("BAP_LLM_CONTEXT_TOKENS", 2048),
+		LLMContextTokens:     envOrDefaultInt("BAP_LLM_CONTEXT_TOKENS", 8192),
 		AllowAnonymous:       envOrDefault("BAP_ALLOW_ANONYMOUS", "true") == "true",
 	}
 }
@@ -514,6 +553,7 @@ func applySchema(db *sql.DB, schemaPath string) error {
 		{table: "summaries", column: "embedding_json", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "summaries", column: "similarity_score", definition: "REAL NOT NULL DEFAULT 0"},
 		{table: "summaries", column: "rerank_position", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "messages", column: "reasoning", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 
 	for _, migration := range migrations {

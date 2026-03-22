@@ -1,0 +1,34 @@
+{{ define "memory" }}
+{{ template "head" . }}
+<div class="app-shell">
+  {{ template "conversation_sidebar" . }}
+  <main class="content">
+    {{ template "status_banner" . }}
+    <section class="hero card hero-compact">
+      <div>
+        <div class="eyebrow">{{ .UserID }}</div>
+        <h1>Persistent memory</h1>
+        <p>This is what bap-search remembers about you across conversations. You can view and edit it freely.</p>
+      </div>
+    </section>
+
+    <form class="stack-form" action="/memory" method="post">
+      <section class="section-block">
+        <article class="card">
+          {{ if .UserMemory }}
+          <div class="markdown-body memory-preview">{{ markdown .UserMemory }}</div>
+          {{ else }}
+          <p class="muted">No memory stored yet. bap-search will start remembering useful context after a few conversations.</p>
+          {{ end }}
+          <label for="memory">Edit memory</label>
+          <textarea id="memory" name="memory" rows="12">{{ .UserMemory }}</textarea>
+        </article>
+      </section>
+      <div>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </main>
+</div>
+{{ template "footer" . }}
+{{ end }}

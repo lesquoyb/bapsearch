@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var needMoreSearchPattern = regexp.MustCompile(`(?is)<<\s*NEED_MORE_SEARCH\s*:(.*?)(?:>>|$)`)
 
 type ConversationService struct {
 	db            *sql.DB
@@ -28,40 +32,41 @@ type MessageRecord struct {
 	ID        int64
 	Role      string
 	Content   string
+	Reasoning string
 	Timestamp time.Time
 }
 
 type SummaryRecord struct {
-	URL        string
-	Summary    string
-	SourceText string
-	Status     string
-	Detail     string
+	URL             string
+	Summary         string
+	SourceText      string
+	Status          string
+	Detail          string
 	SimilarityScore float64
 	RerankPosition  int
 }
 
 type ConversationView struct {
-	ID                int64
-	UserID            string
-	Title             string
-	RewrittenQuery    string
-	RewriteStatus     string
-	RewriteDetail     string
-	AnswerStatus      string
-	AnswerDetail      string
+	ID                   int64
+	UserID               string
+	Title                string
+	RewrittenQuery       string
+	RewriteStatus        string
+	RewriteDetail        string
+	AnswerStatus         string
+	AnswerDetail         string
 	OriginalResultCount  int
 	RewrittenResultCount int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Messages          []MessageRecord
-	SearchResults     []SearchResult
-	EngineStatus      []SearchEngineStatus
-	Summaries         []SummaryRecord
-	SummaryLookup     map[string]SummaryRecord
-	ReadySummaryCount int
-	SummaryTarget     int
-	OverviewSummary   string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	Messages             []MessageRecord
+	SearchResults        []SearchResult
+	EngineStatus         []SearchEngineStatus
+	Summaries            []SummaryRecord
+	SummaryLookup        map[string]SummaryRecord
+	ReadySummaryCount    int
+	SummaryTarget        int
+	OverviewSummary      string
 }
 
 func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +155,8 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		app.handleConversationView(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "delete" && r.Method == http.MethodPost:
+		app.handleConversationDelete(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "results" && r.Method == http.MethodGet:
 		app.handleConversationResults(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "answer" && parts[2] == "stream" && r.Method == http.MethodGet:
@@ -164,6 +171,10 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleConversationMessage(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "messages" && parts[2] == "stream" && r.Method == http.MethodPost:
 		app.handleConversationMessageStream(w, r, conversationID)
+	case len(parts) == 3 && parts[1] == "search-more" && parts[2] == "stream" && r.Method == http.MethodPost:
+		app.handleSearchMoreStream(w, r, conversationID)
+	case len(parts) == 3 && parts[1] == "force-answer" && parts[2] == "stream" && r.Method == http.MethodPost:
+		app.handleForceAnswerStream(w, r, conversationID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -187,7 +198,23 @@ func (app *App) handleConversationView(w http.ResponseWriter, r *http.Request, c
 		Conversations: conversations,
 		Conversation:  &conversation,
 		CurrentModel:  app.currentModelName(),
+		Status:        r.URL.Query().Get("status"),
 	})
+}
+
+func (app *App) handleConversationDelete(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	if err := app.conversations.DeleteConversation(r.Context(), meta.UserID, conversationID); err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to delete conversation", http.StatusInternalServerError)
+		return
+	}
+
+	loggerWithMeta(r.Context(), app.logger, conversationID).Info("conversation_deleted")
+	http.Redirect(w, r, "/?status=conversation+deleted", http.StatusSeeOther)
 }
 
 func (app *App) handleConversationSummaries(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -301,6 +328,13 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// If a previous streaming attempt was interrupted (user navigated away),
+	// answer_status may be stuck on "streaming". Reset it so WaitForAnswerReady
+	// can proceed once the pipeline's ranked sources are available.
+	if conversation.AnswerStatus == "streaming" || conversation.AnswerStatus == "error" {
+		_ = app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "ready", "Retrying after interrupted stream.")
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -330,7 +364,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	sources, err := app.conversations.ListTopRankedSources(r.Context(), conversationID, app.cfg.SummarizeURLLimit)
+	sources, err := app.conversations.ListTopRankedSources(r.Context(), conversationID, app.cfg.ContextDocCount)
 	if err != nil {
 		writeEvent("error", "Failed to load ranked sources.")
 		return
@@ -344,25 +378,89 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("updating answer status failed", "error", err)
 	}
 
-	replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
-	reply, err := app.llm.GenerateGroundedSearchAnswerStream(r.Context(), replyMeta, readyConversation.Title, readyConversation.RewrittenQuery, sources, func(token string) {
-		encoded, _ := json.Marshal(token)
-		fmt.Fprintf(w, "data: %s\n\n", encoded)
-		fl.Flush()
-	})
-	if err != nil {
-		loggerWithMeta(r.Context(), app.logger, conversationID).Error("grounded answer generation failed", "error", err)
-		_ = app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "error", err.Error())
-		writeEvent("error", chatFailureMessage(err))
-		return
+	maxSearchLoops := app.maxSearchLoops(r.Context())
+	searchLoop := 0
+	currentSources := sources
+	currentQuery := readyConversation.RewrittenQuery
+	var reply string
+	var reasoningBuf strings.Builder
+
+	for searchLoop < maxSearchLoops {
+		replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
+
+		reply, err = app.llm.GenerateGroundedSearchAnswerStream(r.Context(), replyMeta, readyConversation.Title, currentQuery, currentSources, func(token string) {
+			reasoningBuf.WriteString(token)
+			writeEvent("reasoning", token)
+		})
+		if err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("grounded answer generation failed", "error", err)
+			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "error", err.Error())
+			writeEvent("error", chatFailureMessage(err))
+			return
+		}
+
+		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, readyConversation.Title, reply)
+		if newSearchQuery == "" {
+			break
+		}
+
+		searchLoop++
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
+			"path", "answer_stream",
+			"loop", searchLoop,
+			"trigger", trigger,
+			"query", newSearchQuery,
+			"current_sources", len(currentSources),
+		)
+		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+
+		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, nil)
+		newSources, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		if processErr != nil || len(newSources) == 0 {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			break
+		}
+
+		currentSources = newSources
+		if app.cfg.SummarizeURLLimit > 0 && len(currentSources) > app.cfg.SummarizeURLLimit {
+			currentSources = currentSources[:app.cfg.SummarizeURLLimit]
+		}
+		currentQuery = newSearchQuery
 	}
 
-	if err := app.conversations.AddMessage(r.Context(), conversationID, "assistant", reply); err != nil {
+	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, readyConversation.Title) {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_limit_reached",
+			"path", "answer_stream",
+			"max_search_loops", maxSearchLoops,
+		)
+		pendingQuery := detectNeedMoreSearch(reply)
+		if pendingQuery == "" {
+			pendingQuery = readyConversation.Title
+		}
+
+		cleaned := stripNeedMoreSearch(reply)
+		if cleaned != "" {
+			encoded, _ := json.Marshal(cleaned)
+			fmt.Fprintf(w, "data: %s\n\n", encoded)
+			fl.Flush()
+			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
+			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated (search limit reached).")
+		}
+
+		writeEvent("search_limit", pendingQuery)
+		writeEvent("done", "")
+		return
+	}
+	encoded, _ := json.Marshal(reply)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fl.Flush()
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("storing assistant answer failed", "error", err)
 		writeEvent("error", "The answer was generated but could not be stored.")
 		return
 	}
-	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "complete", "Grounded answer generated."); err != nil {
+	if err := app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Grounded answer generated."); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("finalizing answer status failed", "error", err)
 	}
 
@@ -401,7 +499,7 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars)
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
 	if err != nil {
 		http.Error(w, "failed to build search context", http.StatusInternalServerError)
 		return
@@ -428,21 +526,78 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 		ConversationID: conversationID,
 	}
 
-	reply, err := app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
-		encoded, _ := json.Marshal(token)
-		fmt.Fprintf(w, "data: %s\n\n", encoded)
-		fl.Flush()
-	})
+	maxChatSearchLoops := app.maxSearchLoops(r.Context())
+	var reply string
+	var reasoningBuf strings.Builder
 
-	if err != nil {
-		loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat generation failed", "error", err)
-		failureMessage := chatFailureMessage(err)
-		_ = app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage)
-		writeEvent("error", failureMessage)
-		return
+	for loop := 0; loop < maxChatSearchLoops; loop++ {
+		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
+			reasoningBuf.WriteString(token)
+			writeEvent("reasoning", token)
+		})
+
+		if err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat generation failed", "error", err)
+			failureMessage := chatFailureMessage(err)
+			_ = app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage)
+			writeEvent("error", failureMessage)
+			return
+		}
+
+		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, message, reply)
+		if newSearchQuery == "" {
+			break
+		}
+
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
+			"path", "message_stream",
+			"loop", loop+1,
+			"trigger", trigger,
+			"query", newSearchQuery,
+		)
+		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+
+		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
+		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		if processErr != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			break
+		}
+
+		// Rebuild context with the re-ranked sources
+		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if err != nil {
+			break
+		}
 	}
 
-	if err := app.conversations.AddMessage(r.Context(), conversationID, "assistant", reply); err != nil {
+	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_limit_reached",
+			"path", "message_stream",
+			"max_search_loops", maxChatSearchLoops,
+		)
+		pendingQuery := detectNeedMoreSearch(reply)
+		if pendingQuery == "" {
+			pendingQuery = message
+		}
+
+		cleaned := stripNeedMoreSearch(reply)
+		if cleaned != "" {
+			encoded, _ := json.Marshal(cleaned)
+			fmt.Fprintf(w, "data: %s\n\n", encoded)
+			fl.Flush()
+			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
+		}
+
+		writeEvent("search_limit", pendingQuery)
+		writeEvent("done", "")
+		return
+	}
+	encoded, _ := json.Marshal(reply)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fl.Flush()
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store streamed reply", "error", err)
 	}
 
@@ -453,6 +608,433 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 	}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+}
+
+func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	query := strings.TrimSpace(r.FormValue("query"))
+	if query == "" {
+		http.Error(w, "query is required", http.StatusBadRequest)
+		return
+	}
+
+	conv, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	writeEvent := func(event, data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		fl.Flush()
+	}
+
+	replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
+
+	writeEvent("status", fmt.Sprintf("Searching: %s", query))
+
+	history, err := app.conversations.GetMessageHistory(r.Context(), meta.UserID, conversationID, app.cfg.MaxChatMessages)
+	if err != nil {
+		writeEvent("error", "Failed to load conversation history.")
+		return
+	}
+	if len(history) == 0 {
+		history = []LLMMessage{{Role: "user", Content: conv.Title}}
+	}
+
+	intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, query, history)
+	_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, query, intentEmb)
+	if processErr != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more processing failed", "error", processErr)
+	}
+
+	memorySummary, _ := app.memory.GetUserMemory(r.Context(), meta.UserID)
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+	if err != nil {
+		writeEvent("error", "Failed to build search context.")
+		return
+	}
+
+	var reply string
+	var reasoningBuf strings.Builder
+	maxLoops := app.maxSearchLoops(r.Context())
+
+	for loop := 0; loop < maxLoops; loop++ {
+		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
+			reasoningBuf.WriteString(token)
+			writeEvent("reasoning", token)
+		})
+		if err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more generation failed", "error", err)
+			writeEvent("error", chatFailureMessage(err))
+			return
+		}
+
+		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, query, reply)
+		if newSearchQuery == "" {
+			break
+		}
+
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
+			"path", "search_more",
+			"loop", loop+1,
+			"trigger", trigger,
+			"query", newSearchQuery,
+		)
+		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+
+		moreIntentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
+		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, moreIntentEmb)
+		if processErr != nil {
+			break
+		}
+
+		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if err != nil {
+			break
+		}
+	}
+
+	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, query) {
+		pendingQuery := detectNeedMoreSearch(reply)
+		if pendingQuery == "" {
+			pendingQuery = query
+		}
+
+		cleaned := stripNeedMoreSearch(reply)
+		if cleaned != "" {
+			encoded, _ := json.Marshal(cleaned)
+			fmt.Fprintf(w, "data: %s\n\n", encoded)
+			fl.Flush()
+			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
+			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated after additional search.")
+		}
+
+		writeEvent("search_limit", pendingQuery)
+		writeEvent("done", "")
+		return
+	}
+
+	encoded, _ := json.Marshal(reply)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fl.Flush()
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more storing reply failed", "error", err)
+	}
+	_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated after additional search.")
+
+	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
+
+	writeEvent("done", "")
+}
+
+func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+
+	conv, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	writeEvent := func(event, data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		fl.Flush()
+	}
+
+	replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
+
+	memorySummary, _ := app.memory.GetUserMemory(r.Context(), meta.UserID)
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+	if err != nil {
+		writeEvent("error", "Failed to build search context.")
+		return
+	}
+
+	history, err := app.conversations.GetMessageHistory(r.Context(), meta.UserID, conversationID, app.cfg.MaxChatMessages)
+	if err != nil {
+		writeEvent("error", "Failed to load conversation history.")
+		return
+	}
+	if len(history) == 0 {
+		history = []LLMMessage{{Role: "user", Content: conv.Title}}
+	}
+
+	var reasoningBuf strings.Builder
+	reply, err := app.llm.GenerateConversationForceReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
+		reasoningBuf.WriteString(token)
+		writeEvent("reasoning", token)
+	})
+	if err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("force-answer generation failed", "error", err)
+		writeEvent("error", chatFailureMessage(err))
+		return
+	}
+
+	encoded, _ := json.Marshal(reply)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fl.Flush()
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("force-answer storing reply failed", "error", err)
+	}
+	_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated with available sources.")
+
+	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
+
+	writeEvent("done", "")
+}
+
+// detectNeedMoreSearch scans LLM output for the <<NEED_MORE_SEARCH: query>> signal.
+func detectNeedMoreSearch(text string) string {
+	matches := needMoreSearchPattern.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return ""
+	}
+	query := strings.TrimSpace(matches[1])
+	if cleaned := sanitizeSearchQuery(query); cleaned != "" {
+		return cleaned
+	}
+	if query != "" {
+		return query
+	}
+	return ""
+}
+
+// stripNeedMoreSearch removes the <<NEED_MORE_SEARCH: ...>> tag from a reply,
+// returning only the real answer content (if any).
+func stripNeedMoreSearch(text string) string {
+	return strings.TrimSpace(needMoreSearchPattern.ReplaceAllString(text, ""))
+}
+
+func (app *App) maxSearchLoops(ctx context.Context) int {
+	value := strings.TrimSpace(app.conversations.GetSetting(ctx, "max_search_loops", "3"))
+	loops, err := strconv.Atoi(value)
+	if err != nil || loops <= 0 {
+		return 3
+	}
+	if loops > 6 {
+		return 6
+	}
+	return loops
+}
+
+
+func (app *App) resolveFollowUpSearchQuery(ctx context.Context, meta RequestMeta, userRequest, reply string) (string, string) {
+	if explicit := detectNeedMoreSearch(reply); explicit != "" {
+		// Always rewrite the model's raw query for better search quality.
+		if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, explicit); err == nil && strings.TrimSpace(rewritten) != "" {
+			return rewritten, "model_need_more_search:rewritten"
+		}
+		return explicit, "model_need_more_search"
+	}
+	trigger := followUpSearchTrigger(userRequest, reply)
+	if trigger == "" {
+		return "", ""
+	}
+	if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, userRequest); err == nil && strings.TrimSpace(rewritten) != "" {
+		return rewritten, trigger + ":rewrite_model"
+	}
+	if cleaned := sanitizeSearchQuery(userRequest); cleaned != "" {
+		return cleaned, trigger + ":sanitized_user_request"
+	}
+	return strings.TrimSpace(userRequest), trigger + ":raw_user_request"
+}
+
+func (app *App) shouldAutoSearchReply(reply, userRequest string) bool {
+	return followUpSearchTrigger(userRequest, reply) != ""
+}
+
+func followUpSearchTrigger(userRequest, reply string) string {
+	replyText := strings.ToLower(strings.TrimSpace(reply))
+	requestText := strings.ToLower(strings.TrimSpace(userRequest))
+	if replyText == "" || requestText == "" {
+		return ""
+	}
+
+	// --- Path 1: LLM deflection (suggesting user visit websites / search manually) ---
+	// This is ALWAYS a failure regardless of what the user asked.
+	deflectionSignals := []string{
+		// English
+		"suggest you visit", "recommend visiting", "suggest you consult",
+		"recommend you consult", "you can find it at", "try searching for",
+		"search on google", "visit the website", "check out the site",
+		"i recommend clicking", "click directly",
+		// French
+		"je vous suggère de consulter", "je vous suggere de consulter",
+		"je vous recommande de consulter", "vous pouvez consulter",
+		"consulter directement", "tapez", "souhaitez-vous que je",
+		"je vous recommande de cliquer", "cliquez directement",
+		"vous pouvez trouver", "rendez-vous sur",
+	}
+	for _, signal := range deflectionSignals {
+		if strings.Contains(replyText, signal) {
+			return "fallback_llm_deflection"
+		}
+	}
+
+	// --- Path 2: User asked for search + reply says context insufficient ---
+	explicitSearchSignals := []string{
+		"search", "find", "look up", "browse", "follow links", "search again",
+		"cherche", "recherche", "trouve", "parcours", "suis des liens", "refais une recherche",
+	}
+	// Implicit search signals: user asks for something different/more
+	implicitSearchSignals := []string{
+		"another", "a different", "other", "something else", "more options",
+		"autre", "un autre", "une autre", "différent", "differente",
+		"d'autres", "encore", "donne-moi", "montre-moi", "propose-moi",
+	}
+	requestAskedForSearch := false
+	for _, signal := range explicitSearchSignals {
+		if strings.Contains(requestText, signal) {
+			requestAskedForSearch = true
+			break
+		}
+	}
+	if !requestAskedForSearch {
+		for _, signal := range implicitSearchSignals {
+			if strings.Contains(requestText, signal) {
+				requestAskedForSearch = true
+				break
+			}
+		}
+	}
+	if !requestAskedForSearch {
+		return ""
+	}
+
+	insufficientSignals := []string{
+		// English
+		"insufficient", "not enough information", "not in the provided context",
+		"current sources", "do not provide", "don't provide", "does not contain",
+		"doesn't contain", "not available in", "no other", "only recipe",
+		"the only", "cannot find", "can't find",
+		// French
+		"pas assez d'informations", "sources actuelles", "ne fournissent",
+		"ne contient pas", "ne contiennent pas", "le contexte actuel",
+		"n'est pas disponible", "la seule recette", "la seule",
+		"ne donnent pas", "sans les étapes", "pas d'autre",
+	}
+	for _, signal := range insufficientSignals {
+		if strings.Contains(replyText, signal) {
+			return "fallback_insufficient_context"
+		}
+	}
+	return ""
+}
+
+// generateIntentEmbedding asks the LLM to describe the ideal answer document,
+// then embeds it. The resulting vector produces better cosine-similarity matches
+// than embedding the raw query. Returns nil on any error so callers can fall
+// back to the plain query embedding.
+func (app *App) generateIntentEmbedding(ctx context.Context, meta RequestMeta, query string, history []LLMMessage) []float64 {
+	intent, err := app.llm.GenerateSearchIntent(ctx, meta, query, history)
+	if err != nil || strings.TrimSpace(intent) == "" {
+		return nil
+	}
+	embedding, err := app.llm.EmbedText(ctx, meta, intent)
+	if err != nil {
+		return nil
+	}
+	return embedding
+}
+
+// inlineSearchAndProcess performs a web search, fetches the result pages,
+// embeds them, stores them, and then re-ranks ALL documents in the conversation
+// by cosine similarity to the given query. It returns the full ranked list.
+// If intentEmbedding is non-nil it is used for re-ranking instead of the raw
+// query embedding — this typically comes from a short LLM-generated paragraph
+// that describes the ideal answer document and embeds more meaningfully.
+func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, conversationID int64, query string, intentEmbedding []float64) ([]RankedSource, error) {
+	searchResp, err := app.search.Search(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+	if len(searchResp.Results) == 0 {
+		return nil, fmt.Errorf("search returned no results")
+	}
+
+	// Tag and store the raw search results
+	for i := range searchResp.Results {
+		searchResp.Results[i].QueryVariant = "iterative"
+	}
+	inserted, err := app.conversations.AppendSearchResults(ctx, conversationID, searchResp.Results, searchResp.EngineStatus)
+	if err != nil {
+		return nil, fmt.Errorf("storing search results failed: %w", err)
+	}
+	if len(inserted) == 0 {
+		return nil, fmt.Errorf("no new results after deduplication")
+	}
+
+	// Limit how many pages we fetch inline to keep latency reasonable
+	limit := app.cfg.SummarizeURLLimit
+	if limit <= 0 {
+		limit = 3
+	}
+	if len(inserted) > limit {
+		inserted = inserted[:limit]
+	}
+
+	// Fetch and extract text from the pages
+	documents := app.fetch.FetchAndExtract(ctx, meta, inserted, func(url, status, detail string) {
+		app.conversations.UpdateSummaryStatus(ctx, conversationID, url, status, detail)
+	})
+
+	// Embed each document and store it
+	for _, doc := range documents {
+		text := strings.TrimSpace(doc.Text)
+		if text == "" || len([]rune(text)) < 80 {
+			continue
+		}
+
+		embedding, err := app.llm.EmbedText(ctx, meta, text)
+		if err != nil {
+			continue
+		}
+		embeddingJSON, err := json.Marshal(embedding)
+		if err != nil {
+			continue
+		}
+
+		preview := buildExtractionPreview(text)
+		_ = app.conversations.StoreDocument(ctx, conversationID, doc.URL, preview, text, string(embeddingJSON))
+	}
+
+	// Determine which embedding to use for ranking
+	rankEmbedding := intentEmbedding
+	if len(rankEmbedding) == 0 {
+		rankEmbedding, err = app.llm.EmbedText(ctx, meta, query)
+		if err != nil {
+			return nil, fmt.Errorf("query embedding failed: %w", err)
+		}
+	}
+
+	// Re-rank ALL documents in the conversation by similarity to the query
+	ranked, err := app.conversations.RerankAllSources(ctx, app.logger, conversationID, rankEmbedding)
+	if err != nil {
+		return nil, fmt.Errorf("re-ranking sources failed: %w", err)
+	}
+
+	return ranked, nil
 }
 
 func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -485,43 +1067,87 @@ func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars)
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
 	if err != nil {
 		http.Error(w, "failed to build search context", http.StatusInternalServerError)
 		return
 	}
 
-	reply, err := app.llm.GenerateConversationReply(r.Context(), RequestMeta{
+	replyMeta := RequestMeta{
 		RequestID:      meta.RequestID,
 		UserID:         meta.UserID,
 		ConversationID: conversationID,
-	}, memorySummary, contextText, history)
-	if err != nil {
-		loggerWithMeta(r.Context(), app.logger, conversationID).Error("chat generation failed", "error", err)
-
-		failureMessage := chatFailureMessage(err)
-		if storeErr := app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage); storeErr != nil {
-			loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store chat failure message", "error", storeErr)
-			http.Error(w, "failed to generate reply", http.StatusBadGateway)
-			return
-		}
-
-		updatedConversation, loadErr := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
-		if loadErr != nil {
-			http.Error(w, "failed to reload messages", http.StatusInternalServerError)
-			return
-		}
-
-		if r.Header.Get("HX-Request") == "true" {
-			app.renderTemplate(w, "chat_messages", updatedConversation)
-			return
-		}
-
-		http.Redirect(w, r, fmt.Sprintf("/conversations/%d#chat", conversationID), http.StatusSeeOther)
-		return
 	}
 
-	if err := app.conversations.AddMessage(r.Context(), conversationID, "assistant", reply); err != nil {
+	maxChatSearchLoops := app.maxSearchLoops(r.Context())
+	var reply string
+	var reasoning string
+	for loop := 0; loop < maxChatSearchLoops; loop++ {
+		reply, reasoning, err = app.llm.GenerateConversationReply(r.Context(), replyMeta, memorySummary, contextText, history)
+		if err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("chat generation failed", "error", err)
+
+			failureMessage := chatFailureMessage(err)
+			if storeErr := app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage); storeErr != nil {
+				loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store chat failure message", "error", storeErr)
+				http.Error(w, "failed to generate reply", http.StatusBadGateway)
+				return
+			}
+
+			updatedConversation, loadErr := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+			if loadErr != nil {
+				http.Error(w, "failed to reload messages", http.StatusInternalServerError)
+				return
+			}
+
+			if r.Header.Get("HX-Request") == "true" {
+				app.renderTemplate(w, "chat_messages", updatedConversation)
+				return
+			}
+
+			http.Redirect(w, r, fmt.Sprintf("/conversations/%d#chat", conversationID), http.StatusSeeOther)
+			return
+		}
+
+		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, message, reply)
+		if newSearchQuery == "" {
+			break
+		}
+
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
+			"path", "message_post",
+			"loop", loop+1,
+			"trigger", trigger,
+			"query", newSearchQuery,
+		)
+
+		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
+		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		if processErr != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			break
+		}
+
+		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if err != nil {
+			break
+		}
+	}
+
+	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_limit_reached",
+			"path", "message_post",
+			"max_search_loops", maxChatSearchLoops,
+		)
+		cleaned := stripNeedMoreSearch(reply)
+		if cleaned != "" {
+			reply = cleaned
+		} else {
+			reply = "I still need more source material to answer reliably, but the search loop limit was reached. Increase max search loops or narrow the request."
+		}
+	}
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoning); err != nil {
 		http.Error(w, "failed to store assistant reply", http.StatusInternalServerError)
 		return
 	}
@@ -613,9 +1239,13 @@ func (service *ConversationService) CreateConversation(ctx context.Context, user
 }
 
 func (service *ConversationService) AddMessage(ctx context.Context, conversationID int64, role, content string) error {
+	return service.AddMessageWithReasoning(ctx, conversationID, role, content, "")
+}
+
+func (service *ConversationService) AddMessageWithReasoning(ctx context.Context, conversationID int64, role, content, reasoning string) error {
 	if _, err := service.db.ExecContext(ctx, `
-        INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)
-    `, conversationID, role, content); err != nil {
+        INSERT INTO messages (conversation_id, role, content, reasoning) VALUES (?, ?, ?, ?)
+    `, conversationID, role, content, reasoning); err != nil {
 		return err
 	}
 	_, err := service.db.ExecContext(ctx, `
@@ -645,6 +1275,25 @@ func (service *ConversationService) ListConversations(ctx context.Context, userI
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (service *ConversationService) DeleteConversation(ctx context.Context, userID string, conversationID int64) error {
+	result, err := service.db.ExecContext(ctx, `
+		DELETE FROM conversations
+		WHERE id = ? AND user_id = ?
+	`, conversationID, userID)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (service *ConversationService) StoreSearchResults(ctx context.Context, conversationID int64, results []SearchResult, engineStatus []SearchEngineStatus) error {
@@ -878,7 +1527,6 @@ func (service *ConversationService) UpdateSummarySource(ctx context.Context, con
 	_, err = service.db.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
 	return err
 }
-
 
 func (service *ConversationService) UpdateDocumentRanking(ctx context.Context, conversationID int64, url string, similarity float64, position int) error {
 	_, err := service.db.ExecContext(ctx, `
@@ -1116,9 +1764,53 @@ func (service *ConversationService) ListTopRankedSources(ctx context.Context, co
 	return sources, rows.Err()
 }
 
+// RerankAllSources recomputes similarity scores for every stored document in a
+// conversation against the given query embedding, sorts by similarity, and
+// updates rerank_position in the database. This is the single source of truth
+// for ranking — called by both the initial pipeline and inline search handlers.
+func (service *ConversationService) RerankAllSources(ctx context.Context, logger *slog.Logger, conversationID int64, queryEmbedding []float64) ([]RankedSource, error) {
+	sources, err := service.ListRankedSources(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+
+	ranked := make([]RankedSource, 0, len(sources))
+	for _, source := range sources {
+		if strings.TrimSpace(source.EmbeddingJSON) == "" || strings.TrimSpace(source.SourceText) == "" {
+			continue
+		}
+
+		var embedding []float64
+		if err := json.Unmarshal([]byte(source.EmbeddingJSON), &embedding); err != nil {
+			logger.Error("embedding deserialization failed", "url", source.URL, "error", err)
+			continue
+		}
+
+		source.SimilarityScore = cosineSimilarity(queryEmbedding, embedding)
+		ranked = append(ranked, source)
+	}
+
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].SimilarityScore == ranked[j].SimilarityScore {
+			return ranked[i].URL < ranked[j].URL
+		}
+		return ranked[i].SimilarityScore > ranked[j].SimilarityScore
+	})
+
+	for index := range ranked {
+		position := index + 1
+		ranked[index].RerankPosition = position
+		if err := service.UpdateDocumentRanking(ctx, conversationID, ranked[index].URL, ranked[index].SimilarityScore, position); err != nil {
+			return nil, err
+		}
+	}
+
+	return ranked, nil
+}
+
 func (service *ConversationService) getMessages(ctx context.Context, conversationID int64) ([]MessageRecord, error) {
 	rows, err := service.db.QueryContext(ctx, `
-        SELECT id, role, content, timestamp
+        SELECT id, role, content, reasoning, timestamp
         FROM messages
         WHERE conversation_id = ?
         ORDER BY timestamp ASC, id ASC
@@ -1131,7 +1823,7 @@ func (service *ConversationService) getMessages(ctx context.Context, conversatio
 	messages := []MessageRecord{}
 	for rows.Next() {
 		var item MessageRecord
-		if err := rows.Scan(&item.ID, &item.Role, &item.Content, &item.Timestamp); err != nil {
+		if err := rows.Scan(&item.ID, &item.Role, &item.Content, &item.Reasoning, &item.Timestamp); err != nil {
 			return nil, err
 		}
 		messages = append(messages, item)
@@ -1160,7 +1852,7 @@ func (service *ConversationService) GetMessageHistory(ctx context.Context, userI
 	return history, nil
 }
 
-func (service *ConversationService) BuildSearchContext(ctx context.Context, userID string, conversationID int64, maxChars int) (string, error) {
+func (service *ConversationService) BuildSearchContext(ctx context.Context, userID string, conversationID int64, maxChars int, maxDocs int) (string, error) {
 	conversation, err := service.GetConversationView(ctx, userID, conversationID)
 	if err != nil {
 		return "", err
@@ -1169,18 +1861,27 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 	if maxChars <= 0 {
 		maxChars = 4200
 	}
+	if maxDocs <= 0 {
+		maxDocs = 5
+	}
 
 	builder := strings.Builder{}
+	docIndex := 0
 	for _, summary := range conversation.Summaries {
 		if summary.Status != "ready" {
 			continue
 		}
-
-		excerpt := compactContextText(summary.SourceText, 700)
-		block := fmt.Sprintf("URL: %s\nRerank position: %d\nSimilarity: %.4f\nSummary:\n%s\n", summary.URL, summary.RerankPosition, summary.SimilarityScore, compactContextText(summary.Summary, 1400))
-		if excerpt != "" {
-			block += fmt.Sprintf("\nExtracted text excerpt:\n%s\n", excerpt)
+		if docIndex >= maxDocs {
+			break
 		}
+		docIndex++
+
+		excerpt := compactContextText(summary.SourceText, 1400)
+		block := fmt.Sprintf("[%d] URL: %s\nSimilarity: %.4f\n", summary.RerankPosition, summary.URL, summary.SimilarityScore)
+		if excerpt != "" {
+			block += fmt.Sprintf("Extracted text excerpt:\n%s\n\n", excerpt)
+		}
+		block += fmt.Sprintf("Summary:\n%s\n", compactContextText(summary.Summary, 900))
 		block += "\n"
 		if builder.Len()+len(block) > maxChars {
 			remaining := maxChars - builder.Len()

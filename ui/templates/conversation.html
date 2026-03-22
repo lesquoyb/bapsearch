@@ -3,8 +3,19 @@
 <div class="app-shell">
   {{ template "conversation_sidebar" . }}
   <main class="content">
+    {{ template "status_banner" . }}
+
     <section class="hero card hero-compact hero-full">
-      <h1>{{ .Conversation.Title }}</h1>
+      <div class="conversation-hero-head">
+        <div>
+          <h1>{{ .Conversation.Title }}</h1>
+        </div>
+        <div class="conversation-hero-actions">
+          <form action="/conversations/{{ .Conversation.ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');">
+            <button class="ghost-button danger-button icon-button" type="submit" title="Delete this conversation and all related data" aria-label="Delete conversation">🗑️</button>
+          </form>
+        </div>
+      </div>
       <form class="search-form search-form-inline" action="/search" method="post" data-submit-loading>
         <label for="q">Start another search</label>
         <div class="search-row">
@@ -22,7 +33,7 @@
       <div class="section-header section-header-inline">
         <div>
           <h2>Raw results</h2>
-          <p class="muted">Results move automatically as soon as they receive a rerank position.</p>
+          <p class="muted">Automatically reordered once ranking is ready.</p>
         </div>
         {{ if .Conversation.EngineStatus }}
         <div class="engine-status-line engine-status-inline" aria-label="Search engine status">
@@ -43,13 +54,10 @@
           <h2>Grounded answer</h2>
         </div>
         <div class="section-header-actions">
-          <small>Selected model: {{ if .CurrentModel }}{{ .CurrentModel }}{{ else }}none selected{{ end }}</small>
-          <button class="ghost-button"
-            hx-post="/conversations/{{ .Conversation.ID }}/summaries/regenerate"
-            hx-target="#summary-panel"
-            hx-swap="innerHTML"
-            hx-on::before-request="document.getElementById('summary-spinner').style.display = ''"
-            title="Reset all summaries and regenerate from scratch">Regenerate</button>
+          <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
+            <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
+          </form>
+          <small title="Current answer model">{{ if .CurrentModel }}◦ {{ .CurrentModel }}{{ else }}◦ No model selected{{ end }}</small>
         </div>
       </div>
 
@@ -87,9 +95,9 @@
         action="/conversations/{{ .Conversation.ID }}/messages"
         method="post">
         <label for="message">Follow-up question</label>
-        <textarea id="message" name="message" rows="4" placeholder="Compare the sources and explain the trade-offs."></textarea>
+        <textarea id="message" name="message" rows="3" placeholder="Compare the sources and explain the trade-offs."></textarea>
         <div class="chat-actions">
-          <p class="muted">The full prompt will include the summary, conversation history, and persistent user memory.</p>
+          <p class="muted">Reply uses the summary, conversation history, and saved memory.</p>
           <button type="submit" data-loading-label="Waiting...">Send</button>
         </div>
       </form>

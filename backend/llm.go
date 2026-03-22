@@ -29,6 +29,11 @@ type LLMService struct {
 	maxResponseTokens int
 	contextTokens     int
 	maxEmbeddingChars int
+	enableThinking    bool
+	reasoningBudget   int
+	temperature       float64
+	topP              float64
+	topK              int
 	Prompts           LLMPrompts
 }
 
@@ -58,19 +63,38 @@ Return plain text markdown with:
 - 3 to 5 concise bullet points grounded in the summaries
 - one short line starting with "Limits:"`
 
+
 	DefaultPromptGroundedAnswer = `You are bap-search, a grounded web answer engine.
 Answer only from the provided extracted source texts.
+Treat the extracted source texts as the primary evidence, not the short summaries.
 Every factual claim must cite at least one source using bracket citations like [1] or [2].
-If the sources are insufficient, say so explicitly.
 Return concise markdown with:
 - one short direct answer paragraph
 - 3 to 6 factual bullet points with citations
-- one short line starting with "Sources:" listing the source numbers you relied on`
+- one short line starting with "Sources:" listing each cited source number with its site name, like: Sources: [1] Wikipedia, [2] Stack Overflow, [3] MDN`
 
 	DefaultPromptChat = `You are bap-search, a conversational search engine.
 Answer using the provided summaries, extracted source text, and conversation history.
-If the context does not support a claim, say that the source material is insufficient.
-Prefer clear, compact answers suitable for follow-up chat.`
+Treat extracted source text as stronger evidence than the short summaries.
+Prefer clear, compact answers suitable for follow-up chat.
+Cite your sources using bracket citations like [1] or [2] matching the source numbers in the search context.
+End your answer with a short "Sources:" line listing each cited source number with its site name, e.g.: Sources: [1] Wikipedia, [2] MDN`
+
+	// SearchToolInstructions is ALWAYS injected into chat and grounded answer
+	// system prompts. It is not user-customizable and not stored in the DB.
+	// This ensures the LLM always knows how to request a new search.
+	SearchToolInstructions = `MANDATORY RULES — follow these without exception:
+- You have a tool: to request a new web search, output ONLY a line exactly like:
+  <<NEED_MORE_SEARCH: your search query in plain text>>
+  When you output this line, do NOT answer the question — output ONLY the NEED_MORE_SEARCH line.
+- You MUST use this tool when the provided context does not contain what the user asks for.
+- You MUST use this tool when the user asks for a different example, another item, more details, or something specific that is missing from the context.
+- NEVER suggest the user visit a website, click a link, or search manually.
+- NEVER recommend external sites by name or URL.
+- NEVER say "I suggest you consult", "you can find it at", "try searching for", or anything similar.
+- If you cannot answer from the provided context, use <<NEED_MORE_SEARCH: ...>> instead of refusing or deflecting.`
+
+	ForceAnswerInstruction = `You MUST answer using ONLY the information already provided in the search context. Do NOT use the <<NEED_MORE_SEARCH>> tag. Synthesize the best possible answer from the available sources, even if the coverage is incomplete. Acknowledge any gaps briefly, then give the most helpful answer you can.`
 
 	DefaultPromptMemory = `Update the user memory based on the following conversation. Keep it short, factual, and useful for future prompts.`
 )
@@ -108,13 +132,13 @@ func (p *LLMPrompts) GetAll() (summarize, synthesize, chat, memory string) {
 }
 
 type llamaChatRequest struct {
-	Model       string       `json:"model,omitempty"`
-	Messages    []LLMMessage `json:"messages"`
-	Temperature float64      `json:"temperature,omitempty"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
+	Model              string         `json:"model,omitempty"`
+	Messages           []LLMMessage   `json:"messages"`
+	Temperature        float64        `json:"temperature,omitempty"`
+	MaxTokens          int            `json:"max_tokens,omitempty"`
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	ReasoningBudget    *int           `json:"reasoning_budget,omitempty"`
-	Stream      bool         `json:"stream"`
+	Stream             bool           `json:"stream"`
 }
 
 type llamaChatResponse struct {
@@ -153,12 +177,17 @@ func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages 
 }
 
 func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int) (string, error) {
+	unlimited := maxTokens < 0
 	if maxTokens <= 0 {
 		maxTokens = service.maxResponseTokens
 	}
 
 	messages = service.fitMessagesToContext(messages, maxTokens)
-	payload := newLlamaChatRequest(messages, maxTokens, false)
+	requestMaxTokens := maxTokens
+	if unlimited {
+		requestMaxTokens = 0
+	}
+	payload := service.newLlamaChatRequest(messages, requestMaxTokens, false, false)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -213,7 +242,10 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 
 	content := strings.TrimSpace(payloadResponse.Choices[0].Message.Content)
 	if content == "" && strings.TrimSpace(payloadResponse.Choices[0].Message.ReasoningContent) != "" {
-		return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+		content = extractAnswerFromReasoning(payloadResponse.Choices[0].Message.ReasoningContent)
+		if content == "" {
+			return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+		}
 	}
 	service.logger.Info("llm_response",
 		"timestamp", time.Now().UTC().Format(time.RFC3339),
@@ -229,16 +261,21 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 // ChatStream sends a streaming request to llama.cpp and calls onToken for each
 // content delta. It returns the full accumulated response when done.
 func (service *LLMService) ChatStream(ctx context.Context, meta RequestMeta, messages []LLMMessage, maxTokens int, onToken func(string)) (string, error) {
-	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, maxTokens, onToken)
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, maxTokens, false, nil, onToken)
 }
 
-func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int, onToken func(string)) (string, error) {
+func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int, enableThinking bool, onReasoning func(string), onToken func(string)) (string, error) {
+	unlimited := maxTokens < 0
 	if maxTokens <= 0 {
 		maxTokens = service.maxResponseTokens
 	}
 
 	messages = service.fitMessagesToContext(messages, maxTokens)
-	payload := newLlamaChatRequest(messages, maxTokens, true)
+	requestMaxTokens := maxTokens
+	if unlimited {
+		requestMaxTokens = 0
+	}
+	payload := service.newLlamaChatRequest(messages, requestMaxTokens, true, enableThinking)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -286,8 +323,12 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 			continue
 		}
 		token := chunk.Choices[0].Delta.Content
-		if token == "" {
-			reasoningBuilder.WriteString(chunk.Choices[0].Delta.ReasoningContent)
+		reasoningToken := chunk.Choices[0].Delta.ReasoningContent
+		if reasoningToken != "" {
+			reasoningBuilder.WriteString(reasoningToken)
+			if onReasoning != nil {
+				onReasoning(reasoningToken)
+			}
 		}
 		if token == "" {
 			continue
@@ -301,7 +342,10 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 
 	result := strings.TrimSpace(builder.String())
 	if result == "" && strings.TrimSpace(reasoningBuilder.String()) != "" {
-		return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+		result = extractAnswerFromReasoning(reasoningBuilder.String())
+		if result == "" {
+			return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
+		}
 	}
 	service.logger.Info("llm_stream_response",
 		"request_id", meta.RequestID,
@@ -310,6 +354,28 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 		"chars", len(result),
 	)
 	return result, nil
+}
+
+// GenerateSearchIntent asks the LLM to produce a short paragraph describing what
+// an ideal document would look like to answer the user's query. The resulting
+// text is designed to embed well for cosine-similarity matching against document
+// embeddings, producing better re-ranking than embedding the raw query alone.
+func (service *LLMService) GenerateSearchIntent(ctx context.Context, meta RequestMeta, query string, history []LLMMessage) (string, error) {
+	prompt := "Given the user's search query and conversation, write a single short paragraph (2-4 sentences) " +
+		"describing the ideal document that would answer the query. Focus on the key concepts, facts, and " +
+		"topics the user needs. Do not ask questions. Only output the paragraph, nothing else."
+
+	messages := []LLMMessage{buildSystemMessage(prompt)}
+	for _, msg := range history {
+		messages = append(messages, msg)
+	}
+	messages = append(messages, LLMMessage{Role: "user", Content: "Search query: " + query})
+
+	intent, err := service.chatWithURL(ctx, service.rewriteURL, meta, messages, 128)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(intent), nil
 }
 
 func (service *LLMService) RewriteSearchQuery(ctx context.Context, meta RequestMeta, query string) (string, error) {
@@ -388,7 +454,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 	return nil, fmt.Errorf("embedding endpoint returned no vector")
 }
 
-func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onToken func(string)) (string, error) {
+func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onReasoning func(string)) (string, error) {
 	blocks := make([]string, 0, len(sources))
 	for index, source := range sources {
 		if strings.TrimSpace(source.SourceText) == "" {
@@ -408,11 +474,11 @@ func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Contex
 	}
 
 	messages := []LLMMessage{
-		buildSystemMessage(DefaultPromptGroundedAnswer),
+		buildSystemMessage(DefaultPromptGroundedAnswer, SearchToolInstructions),
 		{Role: "user", Content: fmt.Sprintf("Original user query: %s\nOptimized search query: %s\n\nTop ranked sources:\n\n%s", originalQuery, targetQuery, strings.Join(blocks, "\n\n"))},
 	}
 
-	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, service.maxResponseTokens, onToken)
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
 }
 
 func (service *LLMService) SummarizePage(ctx context.Context, meta RequestMeta, query, memory, url, text string) (string, error) {
@@ -455,30 +521,50 @@ func (service *LLMService) SynthesizeSearchAnswer(ctx context.Context, meta Requ
 	return service.Chat(ctx, meta, messages, 420)
 }
 
-func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, error) {
+func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, string, error) {
 	messages := []LLMMessage{
 		buildSystemMessage(
 			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+			SearchToolInstructions,
 			optionalSystemSection("Persistent user memory", userMemory),
 			optionalSystemSection("Search context", searchContext),
 		),
 	}
 
 	messages = append(messages, history...)
-	return service.Chat(ctx, meta, messages, service.maxResponseTokens)
+	var reasoningBuf strings.Builder
+	reply, err := service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, func(token string) {
+		reasoningBuf.WriteString(token)
+	}, func(string) {})
+	return reply, reasoningBuf.String(), err
 }
 
-func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onToken func(string)) (string, error) {
+func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning func(string)) (string, error) {
 	messages := []LLMMessage{
 		buildSystemMessage(
 			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+			SearchToolInstructions,
 			optionalSystemSection("Persistent user memory", userMemory),
 			optionalSystemSection("Search context", searchContext),
 		),
 	}
 
 	messages = append(messages, history...)
-	return service.ChatStream(ctx, meta, messages, service.maxResponseTokens, onToken)
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
+}
+
+func (service *LLMService) GenerateConversationForceReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning func(string)) (string, error) {
+	messages := []LLMMessage{
+		buildSystemMessage(
+			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
+			ForceAnswerInstruction,
+			optionalSystemSection("Persistent user memory", userMemory),
+			optionalSystemSection("Search context", searchContext),
+		),
+	}
+
+	messages = append(messages, history...)
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
 }
 
 func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMeta, currentMemory, transcript string) (string, error) {
@@ -493,17 +579,46 @@ func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMet
 	return service.Chat(ctx, meta, messages, 220)
 }
 
-func newLlamaChatRequest(messages []LLMMessage, maxTokens int, stream bool) llamaChatRequest {
-	reasoningBudget := 0
-	return llamaChatRequest{
-		Model:               "local",
-		Messages:            messages,
-		Temperature:         0.2,
-		MaxTokens:           maxTokens,
-		ChatTemplateKwargs:  map[string]any{"enable_thinking": false},
-		ReasoningBudget:     &reasoningBudget,
-		Stream:              stream,
+func (service *LLMService) newLlamaChatRequest(messages []LLMMessage, maxTokens int, stream bool, enableThinking bool) llamaChatRequest {
+	req := llamaChatRequest{
+		Model:       "local",
+		Messages:    messages,
+		Temperature: service.temperature,
+		MaxTokens:   maxTokens,
+		Stream:      stream,
 	}
+	if enableThinking {
+		budget := service.reasoningBudget
+		req.ChatTemplateKwargs = map[string]any{"enable_thinking": true}
+		req.ReasoningBudget = &budget
+	} else {
+		budget := 0
+		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+		req.ReasoningBudget = &budget
+	}
+	return req
+}
+
+// extractAnswerFromReasoning recovers the actual answer from reasoning content
+// produced by thinking models (e.g. Qwen3.5). The model wraps its chain-of-thought
+// in <think>…</think> and places the real answer after the closing tag. If no tag
+// is present, the last non-empty line is returned as a best-effort fallback.
+func extractAnswerFromReasoning(reasoning string) string {
+	if idx := strings.LastIndex(reasoning, "</think>"); idx >= 0 {
+		after := strings.TrimSpace(reasoning[idx+len("</think>"):])
+		if after != "" {
+			return after
+		}
+	}
+	// Fallback: return the last non-empty line (the model sometimes omits the tag)
+	lines := strings.Split(strings.TrimSpace(reasoning), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" && !strings.HasPrefix(line, "<think") && line != "</think>" {
+			return line
+		}
+	}
+	return ""
 }
 
 func buildSystemMessage(parts ...string) LLMMessage {

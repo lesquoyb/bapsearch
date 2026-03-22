@@ -17,7 +17,7 @@
    - `OAUTH2_PROXY_OIDC_ISSUER_URL`
    - `OAUTH2_PROXY_COOKIE_SECRET`
    - `OAUTH2_PROXY_REDIRECT_URL`
-3. Add a GGUF model into [models](../models) or plan to download one from `/models` after startup.
+3. Add a GGUF model into [models](../models) or plan to download one from `/settings` after startup.
 4. Start the stack from [docker](../docker):
 
 ```bash
@@ -77,14 +77,14 @@ Important details:
 
 ## Volumes and persistent data
 
-- [models](../models): GGUF model files and `current-model.txt`
+- [models](../models): GGUF model files and the role assignment files `current-model.txt`, `current-rewrite-model.txt`, and `current-embedding-model.txt`
 - [logs](../logs): JSON backend logs
 - [database](../database): SQLite database file
 
 ## Model management
 
 - Model files are discovered by scanning `/models` for `.gguf`.
-- Selecting a model writes the chosen file name to `/models/current-model.txt`.
+- Saving settings writes the chosen answer, rewrite, and embedding models to role-specific files in `/models`.
 - The llama.cpp container polls that file and reloads the model when it changes.
 
 ## CPU and GPU modes
@@ -155,9 +155,9 @@ The backend writes structured JSON logs to `/logs/backend.jsonl` and stdout. Log
 - `GET /conversations/{id}` conversation page
 - `GET /conversations/{id}/summaries` async summaries block
 - `POST /conversations/{id}/messages` follow-up chat
-- `GET /models` model page
-- `POST /models/select` select active model
-- `POST /models/download` direct GGUF download
+- `GET /settings` settings page
+- `POST /settings` save settings and active models
+- `POST /settings/download` direct GGUF download
 - `GET /healthz` health check
 
 ## Security notes

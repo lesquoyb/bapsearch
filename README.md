@@ -55,11 +55,12 @@ The default Compose stack now starts three dedicated llama.cpp services:
 - `llama-rewrite`
 - `llama-embeddings`
 
-The answer model is still selected by the UI through `models/current-model.txt`.
-The rewrite and embeddings services watch these optional files in the shared models volume:
+The UI saves role-specific model assignments in the shared models volume.
+The llama.cpp services watch these files:
 
 - `models/current-rewrite-model.txt`
 - `models/current-embedding-model.txt`
+- `models/current-model.txt`
 
 If either file is missing, the service falls back to the first `.gguf` file found in `models/`.
 
@@ -149,9 +150,9 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up 
 - `GET /conversations/{id}` conversation view
 - `GET /conversations/{id}/summaries` HTMX summary refresh
 - `POST /conversations/{id}/messages` follow-up chat
-- `GET /models` model management page
-- `POST /models/select` select the active GGUF model
-- `POST /models/download` download a GGUF file into the shared volume
+- `GET /settings` settings and model management page
+- `POST /settings` save settings, prompts, and model assignments
+- `POST /settings/download` download a GGUF file into the shared volume
 - `GET /healthz` backend health check
 
 ## Notes
