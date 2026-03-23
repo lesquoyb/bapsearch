@@ -1,0 +1,35 @@
+{{ define "register" }}
+{{ template "head" . }}
+<div class="auth-shell">
+  <div class="auth-card card">
+    <div class="auth-header">
+      <img class="auth-logo" src="/static/logo.png" alt="bap-search logo">
+      <h1>Create account</h1>
+      <p class="muted">Register a new account to start using bap-search.</p>
+    </div>
+
+    {{ if .Error }}
+    <div class="auth-error" role="alert">{{ .Error }}</div>
+    {{ end }}
+
+    <form class="auth-form" action="/register" method="post">
+      <div class="auth-field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+      </div>
+      <div class="auth-field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" minlength="6" required>
+      </div>
+      <div class="auth-field">
+        <label for="confirm">Confirm password</label>
+        <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="6" required>
+      </div>
+      <button type="submit" class="auth-submit">Create account</button>
+    </form>
+
+    <p class="auth-switch">Already have an account? <a href="/login">Sign in</a></p>
+  </div>
+</div>
+{{ template "footer" . }}
+{{ end }}

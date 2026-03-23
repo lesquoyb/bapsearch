@@ -1196,3 +1196,133 @@ textarea {
     justify-content: flex-start;
   }
 }
+
+/* ===== Embedded auth pages ===== */
+
+.auth-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 32px 16px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 40px 32px;
+}
+
+.auth-header {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.auth-logo {
+  width: 56px;
+  height: 56px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+}
+
+.auth-header h1 {
+  margin: 0 0 6px;
+  font-size: 1.5rem;
+}
+
+.auth-header .muted {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.auth-error {
+  background: rgba(141, 59, 47, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(141, 59, 47, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 20px;
+  font-size: 0.9rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-field label {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.auth-field input {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 1rem;
+  font-family: inherit;
+  background: var(--bg);
+  color: var(--ink);
+  transition: border-color 120ms ease;
+}
+
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(12, 124, 89, 0.15);
+}
+
+.auth-submit {
+  margin-top: 8px;
+  padding: 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.auth-submit:hover {
+  background: var(--accent-strong);
+}
+
+.auth-switch {
+  text-align: center;
+  margin: 20px 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.auth-switch a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.auth-switch a:hover {
+  text-decoration: underline;
+}
+
+/* Sidebar logout */
+
+.sidebar-logout-form {
+  display: inline;
+  margin-left: 4px;
+}
+
+.sidebar-logout-button {
+  font-size: 0.85rem;
+  vertical-align: middle;
+}

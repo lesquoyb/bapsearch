@@ -47,6 +47,7 @@ type Config struct {
 	LLMMaxResponseTokens int
 	LLMContextTokens     int
 	AllowAnonymous       bool
+	SessionSecret        string
 }
 
 type App struct {
@@ -88,6 +89,11 @@ func main() {
 		panic(err)
 	}
 	defer closeLogger()
+
+	if cfg.SessionSecret == "" {
+		cfg.SessionSecret = generateSessionSecret()
+		logger.Warn("no BAP_SESSION_SECRET set – generated a random one (sessions will not survive restarts)")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		logger.Error("failed to create database directory", "error", err)
@@ -414,8 +420,11 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/settings/download", app.handleModelDownload)
 	mux.HandleFunc("/memory", app.handleMemoryPage)
 	mux.HandleFunc("/llama-status", app.handleLlamaStatus)
+	mux.HandleFunc("/login", app.handleLoginPage)
+	mux.HandleFunc("/register", app.handleRegisterPage)
+	mux.HandleFunc("/logout", app.handleLogout)
 
-	return withMiddlewares(mux, app.logger, app.cfg.AllowAnonymous)
+	return withMiddlewares(mux, app.logger, app.cfg.AllowAnonymous, app.cfg.SessionSecret)
 }
 
 func (app *App) render(w http.ResponseWriter, name string, data PageData) {
@@ -527,6 +536,7 @@ func loadConfig() Config {
 		LLMMaxResponseTokens: envOrDefaultInt("BAP_LLM_MAX_TOKENS", 700),
 		LLMContextTokens:     envOrDefaultInt("BAP_LLM_CONTEXT_TOKENS", 8192),
 		AllowAnonymous:       envOrDefault("BAP_ALLOW_ANONYMOUS", "true") == "true",
+		SessionSecret:        envOrDefault("BAP_SESSION_SECRET", ""),
 	}
 }
 
@@ -554,6 +564,7 @@ func applySchema(db *sql.DB, schemaPath string) error {
 		{table: "summaries", column: "similarity_score", definition: "REAL NOT NULL DEFAULT 0"},
 		{table: "summaries", column: "rerank_position", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "messages", column: "reasoning", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "users", column: "password_hash", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 
 	for _, migration := range migrations {

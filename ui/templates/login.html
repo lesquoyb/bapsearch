@@ -1,0 +1,31 @@
+{{ define "login" }}
+{{ template "head" . }}
+<div class="auth-shell">
+  <div class="auth-card card">
+    <div class="auth-header">
+      <img class="auth-logo" src="/static/logo.png" alt="bap-search logo">
+      <h1>Sign in</h1>
+      <p class="muted">Enter your credentials to access bap-search.</p>
+    </div>
+
+    {{ if .Error }}
+    <div class="auth-error" role="alert">{{ .Error }}</div>
+    {{ end }}
+
+    <form class="auth-form" action="/login" method="post">
+      <div class="auth-field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+      </div>
+      <div class="auth-field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="auth-submit">Sign in</button>
+    </form>
+
+    <p class="auth-switch">Don't have an account? <a href="/register">Create one</a></p>
+  </div>
+</div>
+{{ template "footer" . }}
+{{ end }}

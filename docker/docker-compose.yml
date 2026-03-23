@@ -156,6 +156,7 @@ services:
       BAP_CURRENT_MODEL_PATH: /models/current-model.txt
       BAP_LOG_PATH: /logs/backend.jsonl
       BAP_ALLOW_ANONYMOUS: ${BAP_ALLOW_ANONYMOUS:-true}
+      BAP_SESSION_SECRET: ${BAP_SESSION_SECRET:-}
       SEARXNG_SEARCH_URL: http://searxng:8080/search
       LLAMA_CPP_URL: ${LLAMA_CPP_URL:-http://llama-answer:8080/v1/chat/completions}
       LLAMA_CPP_REWRITE_URL: ${LLAMA_CPP_REWRITE_URL:-http://llama-rewrite:8080/v1/chat/completions}

@@ -39,8 +39,8 @@ func newJSONLogger(logPath string) (*slog.Logger, func() error, error) {
 	return logger, file.Close, nil
 }
 
-func withMiddlewares(next http.Handler, logger *slog.Logger, allowAnonymous bool) http.Handler {
-	return recoverMiddleware(logger, authMiddleware(loggingMiddleware(next, logger), allowAnonymous))
+func withMiddlewares(next http.Handler, logger *slog.Logger, allowAnonymous bool, sessionSecret string) http.Handler {
+	return recoverMiddleware(logger, authMiddleware(loggingMiddleware(next, logger), allowAnonymous, sessionSecret))
 }
 
 func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
@@ -63,8 +63,16 @@ func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 	})
 }
 
-func authMiddleware(next http.Handler, allowAnonymous bool) http.Handler {
+func authMiddleware(next http.Handler, allowAnonymous bool, sessionSecret string) http.Handler {
+	// Paths that must be accessible without authentication.
+	publicPaths := map[string]bool{
+		"/login":    true,
+		"/register": true,
+		"/healthz":  true,
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health-check shortcut.
 		if r.URL.Path == "/healthz" {
 			meta := RequestMeta{RequestID: newRequestID(), UserID: "healthcheck"}
 			ctx := context.WithValue(r.Context(), requestMetaKey, meta)
@@ -72,13 +80,41 @@ func authMiddleware(next http.Handler, allowAnonymous bool) http.Handler {
 			return
 		}
 
-		userID := strings.TrimSpace(r.Header.Get("X-Forwarded-User"))
+		// Allow static assets without auth.
+		if strings.HasPrefix(r.URL.Path, "/static/") {
+			meta := RequestMeta{RequestID: newRequestID(), UserID: "static"}
+			ctx := context.WithValue(r.Context(), requestMetaKey, meta)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		var userID string
+
+		// 1. Check X-Forwarded-User header (proxy auth).
+		userID = strings.TrimSpace(r.Header.Get("X-Forwarded-User"))
+
+		// 2. Check session cookie (embedded auth).
 		if userID == "" {
-			if !allowAnonymous {
-				http.Error(w, "authentication required", http.StatusUnauthorized)
+			if cookie, err := r.Cookie(sessionCookieName); err == nil {
+				userID = parseSessionToken(cookie.Value, sessionSecret)
+			}
+		}
+
+		// 3. If still no user, handle public paths, anonymous, or redirect to login.
+		if userID == "" {
+			if publicPaths[r.URL.Path] {
+				meta := RequestMeta{RequestID: newRequestID(), UserID: "anonymous"}
+				ctx := context.WithValue(r.Context(), requestMetaKey, meta)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-			userID = "dev-user"
+
+			if allowAnonymous {
+				userID = "dev-user"
+			} else {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
 		}
 
 		conversationID := int64(0)

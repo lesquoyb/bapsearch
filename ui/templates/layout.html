@@ -573,6 +573,9 @@
   </div>
 
   <a class="user-pill" href="/memory" title="View persistent memory">{{ .UserID }}</a>
+  <form class="sidebar-logout-form" action="/logout" method="post">
+    <button class="ghost-button sidebar-logout-button icon-button" type="submit" title="Sign out" aria-label="Sign out">⏻</button>
+  </form>
 
   <div class="sidebar-section sidebar-main-section">
     <h2>Conversations</h2>
