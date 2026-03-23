@@ -264,11 +264,11 @@ services:
     volumes:
       - ./searxng-settings.yml:/etc/searxng/settings.yml
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=5)\""]
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/"]
       interval: 10s
       timeout: 5s
-      retries: 8
-      start_period: 10s
+      retries: 10
+      start_period: 15s
     networks:
       - public
       - internal
