@@ -28,7 +28,7 @@ bap-search is a self-hosted conversational search engine designed for small mach
 - CPU mode works by default.
 - GPU offload is configurable for llama.cpp through Compose env vars.
 - NVIDIA mode is enabled with [docker/docker-compose.gpu.yml](docker/docker-compose.gpu.yml) plus a GPU-capable llama.cpp image such as `ghcr.io/ggml-org/llama.cpp:server-cuda`.
-- A ready-to-use NVIDIA preset is provided in [.env.nvidia.example](.env.nvidia.example).
+- A ready-to-use NVIDIA preset is provided in [docker/.env.nvidia.example](docker/.env.nvidia.example).
 
 ## Core flow
 
@@ -68,7 +68,7 @@ To avoid llama.cpp batch-limit failures on long extracted pages, the backend tru
 
 ## Quick start
 
-1. Copy [.env.example](.env.example) to `.env`.
+1. Copy [docker/.env.example](.docker/env.example) to `docker/.env`.
 2. Put at least one GGUF model into [models](models) or download one from the UI after startup.
 3. Start the stack:
 
@@ -99,8 +99,8 @@ With this override, only `auth-proxy` is published publicly. `backend`, `llama`,
 
 An integrated Authentik stack is included for self-hosted account management.
 
-1. Copy [.env.authentik.example](.env.authentik.example) to `.env`.
-	If you launch Compose from [docker](docker), also copy [docker/.env.authentik.example](docker/.env.authentik.example) to [docker/.env](docker/.env), or use `--env-file ../.env.authentik.example`.
+1. Copy [.env.authentik.example](.env.authentik.example) to `docker/.env`.
+	If you launch Compose from [docker](docker), also copy [docker/.env.authentik.example](docker/.env.authentik.example) to [docker/.env](docker/.env), or use `--env-file .env.authentik.example`.
 2. Start the stack:
 
 ```bash
@@ -115,12 +115,12 @@ docker compose --profile auth --profile authentik -f docker/docker-compose.yml -
 
 3. Open `http://localhost:9000/if/flow/initial-setup/` and finish the initial Authentik setup.
 4. Follow [docs/authentik.md](docs/authentik.md) to create the exact Authentik application and provider.
-5. Copy the Authentik client ID and client secret into `.env` as `OAUTH2_PROXY_CLIENT_ID` and `OAUTH2_PROXY_CLIENT_SECRET`.
+5. Copy the Authentik client ID and client secret into `docker/.env` as `OAUTH2_PROXY_CLIENT_ID` and `OAUTH2_PROXY_CLIENT_SECRET`.
 	If you run Compose from [docker](docker), keep the same values in [docker/.env](docker/.env) as well.
 
 `oauth2-proxy` is preconfigured to use the Authentik issuer URL `http://authentik-server:9000/application/o/bap-search/` from inside the Docker network. In the default Authentik preset, `auth-proxy` stays on port `8080`, while the backend is still reachable directly on `8081` for debugging. With [docker/docker-compose.auth-secure.yml](docker/docker-compose.auth-secure.yml), the backend is no longer published at all.
 
-For NVIDIA GPU mode, copy [.env.nvidia.example](.env.nvidia.example) to `.env` and run:
+For NVIDIA GPU mode, copy [docker/.env.nvidia.example](docker/.env.nvidia.example) to `docker/.env` and run:
 
 ```bash
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up --build
