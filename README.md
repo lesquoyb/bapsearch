@@ -1,162 +1,230 @@
 # bap-search
 
-bap-search is a self-hosted conversational search engine designed for small machines. It combines SearXNG for metasearch, a Go backend, a lightweight HTMX UI, SQLite persistence, and llama.cpp for local inference.
+Self-hosted conversational search engine for small machines. Combines SearXNG metasearch, a Go backend, llama.cpp for local inference, SQLite persistence, and a lightweight HTMX interface.
 
 ## What it does
 
-- Runs SearXNG internally and keeps it off the public network.
-- Returns raw search results immediately.
-- Runs the original user query and an LLM-rewritten search query in parallel against SearXNG.
-- Extracts source text as raw results arrive, embeds the extracted text, and reranks sources by similarity to the rewritten query.
-- Streams a grounded final answer from the top reranked sources, with citations back to the source sites.
-- Stores each search as a conversation thread with messages, results, summaries, and persistent user memory.
-- Serves a lightweight interface with HTML templates, HTMX, and minimal JavaScript.
-- Logs structured JSON events to a mounted logs volume.
+- Runs SearXNG internally on an isolated Docker network.
+- Returns raw search results immediately while the pipeline works in the background.
+- Rewrites the user query with a small LLM and runs both the original and rewritten queries against SearXNG in parallel.
+- Fetches each result page, extracts clean text with trafilatura, generates embeddings, and reranks sources by cosine similarity.
+- Streams a grounded answer from the top-ranked sources with inline citations.
+- Supports iterative search: the model can request additional searches when it needs more information, with user confirmation.
+- Stores everything as threaded conversations with messages, results, summaries, and engine statuses.
+- Maintains persistent per-user memory that is automatically refreshed and reused across conversations.
+- Supports chain-of-thought reasoning with configurable budget (for models like Qwen3.5).
+- All parameters (LLM sampling, search depth, context limits, prompts) are editable from the settings page.
+- Logs structured JSON to a mounted volume.
 
 ## Stack
 
-- Go 1.24 backend
-- SQLite database
-- llama.cpp server container
-- OAuth2 Proxy for auth enforcement
-- Authentik optional self-hosted identity provider
-- SearXNG internal metasearch
-- Docker Compose orchestration
-
-## LLM runtime
-
-- CPU mode works by default.
-- GPU offload is configurable for llama.cpp through Compose env vars.
-- NVIDIA mode is enabled with [docker/docker-compose.gpu.yml](docker/docker-compose.gpu.yml) plus a GPU-capable llama.cpp image such as `ghcr.io/ggml-org/llama.cpp:server-cuda`.
-- A ready-to-use NVIDIA preset is provided in [docker/.env.nvidia.example](docker/.env.nvidia.example).
-
-## Core flow
-
-1. User submits a search.
-2. Backend creates a conversation and starts the search pipeline in the background.
-3. The original query goes to SearXNG immediately while a small rewrite model produces a more precise search query in parallel.
-4. Both result sets are merged into the raw-results panel as they arrive.
-5. Each newly stored URL is fetched, cleaned with trafilatura, and embedded.
-6. The extracted sources are reranked by cosine similarity against the rewritten-query embedding.
-7. The final answer model streams a grounded response from the top reranked sources and cites them inline.
-8. User memory is periodically refreshed and reused in later prompts.
-
-## Multi-model endpoints
-
-The backend now supports separate endpoints for the three model roles in the pipeline:
-
-- `LLAMA_CPP_REWRITE_URL`: query rewrite model.
-- `LLAMA_CPP_EMBEDDINGS_URL`: embeddings model.
-- `LLAMA_CPP_URL`: final answer and follow-up chat model.
-
-The default Compose stack now starts three dedicated llama.cpp services:
-
-- `llama-answer`
-- `llama-rewrite`
-- `llama-embeddings`
-
-The UI saves role-specific model assignments in the shared models volume.
-The llama.cpp services watch these files:
-
-- `models/current-rewrite-model.txt`
-- `models/current-embedding-model.txt`
-- `models/current-model.txt`
-
-If either file is missing, the service falls back to the first `.gguf` file found in `models/`.
-
-To avoid llama.cpp batch-limit failures on long extracted pages, the backend truncates document text before `/v1/embeddings` using `BAP_MAX_EMBEDDING_CHARS`.
+| Component | Role |
+|---|---|
+| Go 1.25 backend | API, search pipeline, streaming, SQLite |
+| SQLite | Conversations, users, settings, memory |
+| llama.cpp (×3 containers) | Answer, query rewrite, embeddings |
+| SearXNG | Internal metasearch engine |
+| trafilatura | Web page text extraction |
+| HTMX + vanilla JS | Lightweight frontend |
+| Docker Compose | Orchestration |
 
 ## Quick start
 
-1. Copy [docker/.env.example](.docker/env.example) to `docker/.env`.
-2. Put at least one GGUF model into [models](models) or download one from the UI after startup.
-3. Start the stack:
+1. Put at least one `.gguf` model into the `models/` directory (or download one from the settings page after startup).
 
-```bash
-cd docker
-docker compose up --build
-```
-
-4. Open `http://localhost:8080`.
-
-By default, `http://localhost:8080` goes straight to the backend with anonymous local access enabled.
-
-If you later want authentication with an external OIDC provider, start the optional proxy profile:
-
-```bash
-docker compose --profile auth -f docker/docker-compose.yml up --build
-```
-
-For a production-style auth setup where the backend is not published directly, add [docker/docker-compose.auth-secure.yml](docker/docker-compose.auth-secure.yml):
-
-```bash
-docker compose --profile auth -f docker/docker-compose.yml -f docker/docker-compose.auth-secure.yml up --build
-```
-
-With this override, only `auth-proxy` is published publicly. `backend`, `llama`, and `searxng` stay internal to the Compose network.
-
-## Authentik
-
-An integrated Authentik stack is included for self-hosted account management.
-
-1. Copy [.env.authentik.example](.env.authentik.example) to `docker/.env`.
-	If you launch Compose from [docker](docker), also copy [docker/.env.authentik.example](docker/.env.authentik.example) to [docker/.env](docker/.env), or use `--env-file .env.authentik.example`.
 2. Start the stack:
 
+   ```bash
+   cd docker
+   docker compose up --build
+   ```
+
+3. Open http://localhost:8080.
+
+By default, anonymous access is enabled (`BAP_ALLOW_ANONYMOUS=true`) and you land directly on the search page as `dev-user`.
+
+With `make`:
+
 ```bash
-docker compose --profile auth --profile authentik -f docker/docker-compose.yml up --build
+make up        # CPU mode
+make up-gpu    # NVIDIA GPU mode
 ```
 
-For a production-style auth setup that hides the backend port completely, use:
+### NVIDIA GPU mode
 
-```bash
-docker compose --profile auth --profile authentik -f docker/docker-compose.yml -f docker/docker-compose.auth-secure.yml up --build
-```
-
-3. Open `http://localhost:9000/if/flow/initial-setup/` and finish the initial Authentik setup.
-4. Follow [docs/authentik.md](docs/authentik.md) to create the exact Authentik application and provider.
-5. Copy the Authentik client ID and client secret into `docker/.env` as `OAUTH2_PROXY_CLIENT_ID` and `OAUTH2_PROXY_CLIENT_SECRET`.
-	If you run Compose from [docker](docker), keep the same values in [docker/.env](docker/.env) as well.
-
-`oauth2-proxy` is preconfigured to use the Authentik issuer URL `http://authentik-server:9000/application/o/bap-search/` from inside the Docker network. In the default Authentik preset, `auth-proxy` stays on port `8080`, while the backend is still reachable directly on `8081` for debugging. With [docker/docker-compose.auth-secure.yml](docker/docker-compose.auth-secure.yml), the backend is no longer published at all.
-
-For NVIDIA GPU mode, copy [docker/.env.nvidia.example](docker/.env.nvidia.example) to `docker/.env` and run:
+Copy `docker/.env.nvidia.example` to `docker/.env` then:
 
 ```bash
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up --build
 ```
 
-## Project layout
+This uses `ghcr.io/ggml-org/llama.cpp:server-cuda` with full GPU layer offload.
 
-- [backend](backend)
-- [docker](docker)
-- [ui](ui)
-- [models](models)
-- [database](database)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/setup.md](docs/setup.md)
-- [docs/authentik.md](docs/authentik.md)
-- [docs/api.md](docs/api.md)
-- [docs/prompts.md](docs/prompts.md)
-- [docs/logging.md](docs/logging.md)
-- [docs/security.md](docs/security.md)
-- [LICENSE](LICENSE)
-- [Makefile](Makefile)
+## Search pipeline
+
+1. User submits a query.
+2. Backend creates a conversation and enqueues a background job.
+3. The original query goes to SearXNG. A rewrite model produces an optimized search query in parallel.
+4. Both result sets are merged and displayed as raw results.
+5. Top URLs are fetched concurrently (`BAP_FETCH_WORKERS`), cleaned with trafilatura, and embedded.
+6. Sources are reranked by cosine similarity against the rewritten-query embedding.
+7. The answer model streams a grounded response with citations from the top sources.
+8. If the model signals it needs more data (`NEED_MORE_SEARCH`), the user is prompted to continue searching or answer with what's available.
+9. User memory is refreshed in the background after each conversation.
+
+## Multi-model architecture
+
+Three dedicated llama.cpp services run in parallel, each watching its own model file:
+
+| Service | Env var | Model file |
+|---|---|---|
+| `llama-answer` | `LLAMA_CPP_URL` | `models/current-model.txt` |
+| `llama-rewrite` | `LLAMA_CPP_REWRITE_URL` | `models/current-rewrite-model.txt` |
+| `llama-embeddings` | `LLAMA_CPP_EMBEDDINGS_URL` | `models/current-embedding-model.txt` |
+
+Model assignments are managed from the settings page. Each file contains the filename of the `.gguf` to load. If a file is missing, the service falls back to the first `.gguf` found in `models/`.
+
+The backend truncates document text before embedding using `BAP_MAX_EMBEDDING_CHARS` to avoid exceeding llama.cpp batch limits.
+
+## Authentication
+
+bap-search supports three authentication modes, from simplest to most secure:
+
+### 1. Anonymous mode (default)
+
+No login required. All requests use `dev-user`.
+
+```env
+BAP_ALLOW_ANONYMOUS=true
+```
+
+### 2. Embedded accounts
+
+Built-in username/password authentication with bcrypt-hashed passwords stored in SQLite. No external service needed.
+
+```env
+BAP_ALLOW_ANONYMOUS=false
+BAP_SESSION_SECRET=your-random-secret-here
+```
+
+- Users register at `/register` and sign in at `/login`.
+- Sessions are HMAC-SHA256 signed cookies valid for 30 days.
+- If `BAP_SESSION_SECRET` is not set, a random one is generated at startup (sessions won't survive restarts).
+- The logout button appears in the sidebar.
+
+### 3. External OIDC (OAuth2 Proxy + Authentik)
+
+For production deployments with SSO. Uses OAuth2 Proxy in front of the backend with an external OIDC provider.
+
+```bash
+docker compose --profile auth -f docker/docker-compose.yml up --build
+```
+
+To also run a self-hosted Authentik identity provider:
+
+```bash
+docker compose --profile auth --profile authentik -f docker/docker-compose.yml up --build
+```
+
+To hide the backend port entirely in production:
+
+```bash
+docker compose --profile auth --profile authentik \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.auth-secure.yml up --build
+```
+
+See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
+
+**Authentication priority:** `X-Forwarded-User` header (proxy) → session cookie (embedded) → anonymous fallback → redirect to `/login`.
+
+## Configuration
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `BAP_ADDR` | `:8081` | Backend listen address |
+| `BAP_ALLOW_ANONYMOUS` | `true` | Allow unauthenticated access |
+| `BAP_SESSION_SECRET` | (auto-generated) | HMAC key for session cookies |
+| `BAP_DB_PATH` | `/database/bap-search.db` | SQLite database path |
+| `BAP_SUMMARIZE_URL_LIMIT` | `3` | URLs to fetch & summarize per search |
+| `BAP_FETCH_WORKERS` | `3` | Concurrent page fetch workers |
+| `BAP_MAX_EXTRACT_CHARS` | `12000` | Max chars extracted per page |
+| `BAP_MAX_EMBEDDING_CHARS` | `1800` | Max chars sent to embedding model |
+| `BAP_CHAT_CONTEXT_CHARS` | `4200` | Conversation context for follow-ups |
+| `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
+| `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |
+| `BAP_LLM_CONTEXT_TOKENS` | `8192` | LLM context window size |
+| `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
+| `LLAMA_CPP_REWRITE_URL` | (same as answer) | Rewrite model endpoint |
+| `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama:8080/v1/embeddings` | Embedding model endpoint |
+
+### UI settings
+
+All of these are adjustable from the `/settings` page without restart:
+
+- **Model assignments** — answer, rewrite, embedding model per role
+- **LLM sampling** — temperature, top-p, top-k, max tokens
+- **Reasoning** — enable/disable chain-of-thought, reasoning budget
+- **Search** — results per search, iterative search loops, URLs to summarize, max extract chars, fetch workers
+- **Embeddings** — similarity threshold
+- **Chat** — context chars, max messages in context
+- **Prompts** — summarize, synthesize, chat, and memory prompts (fully editable)
 
 ## Core endpoints
 
-- `GET /` search landing page
-- `POST /search` create conversation and run a search
-- `GET /conversations/{id}` conversation view
-- `GET /conversations/{id}/summaries` HTMX summary refresh
-- `POST /conversations/{id}/messages` follow-up chat
-- `GET /settings` settings and model management page
-- `POST /settings` save settings, prompts, and model assignments
-- `POST /settings/download` download a GGUF file into the shared volume
-- `GET /healthz` backend health check
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Search landing page |
+| `POST` | `/search` | Create conversation and run search |
+| `GET` | `/conversations/{id}` | Conversation view |
+| `GET` | `/conversations/{id}/results` | HTMX raw results refresh |
+| `GET` | `/conversations/{id}/summaries` | HTMX summary refresh |
+| `GET` | `/conversations/{id}/answer/stream` | SSE initial answer stream |
+| `POST` | `/conversations/{id}/messages` | Follow-up chat message |
+| `POST` | `/conversations/{id}/messages/stream` | SSE chat reply stream |
+| `POST` | `/conversations/{id}/search-more/stream` | SSE iterative search stream |
+| `POST` | `/conversations/{id}/force-answer/stream` | SSE force answer with current sources |
+| `POST` | `/conversations/{id}/summaries/regenerate` | Rebuild summaries from stored results |
+| `POST` | `/conversations/{id}/delete` | Delete conversation |
+| `GET` | `/settings` | Settings page |
+| `POST` | `/settings/save` | Save settings |
+| `POST` | `/settings/download` | Download a GGUF model from URL |
+| `GET` | `/memory` | View/edit persistent user memory |
+| `POST` | `/memory` | Save user memory |
+| `GET` | `/login` | Login page |
+| `POST` | `/login` | Authenticate |
+| `GET` | `/register` | Registration page |
+| `POST` | `/register` | Create account |
+| `POST` | `/logout` | Sign out |
+| `GET` | `/healthz` | Health check |
+| `GET` | `/llama-status` | Model server status (JSON) |
 
-## Notes
+## Project layout
 
-- The backend serves the lightweight web UI directly.
-- The llama.cpp process is long-lived and reloads only when the selected GGUF model changes.
-- The workspace I used here does not have `go` or `docker` installed, so the repository was statically validated but not executed locally.
+```
+backend/          Go backend (single binary)
+database/         SQLite schema
+docker/           Compose files, Dockerfiles, SearXNG config
+  backend.Dockerfile
+  docker-compose.yml
+  docker-compose.gpu.yml
+  docker-compose.auth-secure.yml
+  llama-entrypoint.sh
+  searxng-settings.yml
+  .env.example
+  .env.nvidia.example
+  .env.authentik.example
+ui/
+  templates/      HTML templates (layout, index, conversation, settings, memory, login, register)
+  static/         CSS, favicon
+models/           GGUF model files + current-model pointers
+logs/             Structured JSON logs
+docs/             Architecture, setup, auth, API, prompts, logging, security docs
+Makefile          Shortcuts for compose commands
+```
+
+## License
+
+See [LICENSE](LICENSE).
