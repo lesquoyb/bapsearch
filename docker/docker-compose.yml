@@ -138,8 +138,8 @@ services:
       dockerfile: docker/backend.Dockerfile
     restart: unless-stopped
     depends_on:
-      searxng:
-        condition: service_healthy
+      # searxng:
+      #   condition: service_healthy
       llama-answer:
         condition: service_started
       llama-rewrite:
