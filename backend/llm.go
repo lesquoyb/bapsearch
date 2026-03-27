@@ -43,6 +43,7 @@ const (
 	minTrimmableMessageLen = 256
 )
 
+
 const (
 	DefaultPromptSummarize = `You are bap-search, a search assistant running on a small self-hosted machine.
 Produce a concise factual summary of the extracted page.
@@ -50,9 +51,9 @@ Focus on facts useful for answering the user's query.
 Return plain text with 3 short bullet points and one short concluding sentence.`
 
 	DefaultPromptRewriteSearch = `You rewrite a user query into a stronger web search query.
-Return only one short search string.
-Prefer precise nouns, product names, standards, dates, error names, and discriminating keywords.
-Do not add explanations, quotes, bullets, or prefixes.`
+Return only one short search string, never an explanation or reasoning.
+Do NOT explain, justify, or output any reasoning, chain-of-thought, or <think> tags.
+Return only the improved search string, nothing else.`
 
 	DefaultPromptSynthesize = `You are bap-search, a conversational search engine.
 You receive article summaries that were already generated from individual search results.
@@ -773,21 +774,29 @@ func (service *LLMService) truncateForPrompt(value string, maxChars int) string 
 }
 
 func sanitizeSearchQuery(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.Trim(value, "\"'`")
-	value = strings.ReplaceAll(value, "\r", " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	value = strings.TrimPrefix(value, "query:")
-	value = strings.TrimPrefix(value, "Query:")
-	value = strings.Join(strings.Fields(value), " ")
-	if len([]rune(value)) > 180 {
-		value = string([]rune(value)[:180])
-	}
-	value = strings.TrimSpace(strings.Trim(value, "|/\\.,:;_-"))
-	if !isUsableSearchQuery(value) {
-		return ""
-	}
-	return value
+       value = strings.TrimSpace(value)
+       value = strings.Trim(value, "\"'`")
+       value = strings.ReplaceAll(value, "\r", " ")
+       value = strings.ReplaceAll(value, "\n", " ")
+       value = strings.TrimPrefix(value, "query:")
+       value = strings.TrimPrefix(value, "Query:")
+       value = strings.Join(strings.Fields(value), " ")
+       // Reject any answer containing <think>, </think>, or other tags, or that looks like reasoning
+       if strings.Contains(value, "<think>") || strings.Contains(value, "</think>") || strings.Contains(value, "Reasoning:") || strings.Contains(value, "Answer:") || strings.Contains(value, "Bullet") || strings.Contains(value, "explanation") || strings.Contains(value, "justification") {
+	       return ""
+       }
+       // Reject if it contains any angle brackets (likely hallucinated tags)
+       if strings.ContainsAny(value, "<>") {
+	       return ""
+       }
+       if len([]rune(value)) > 180 {
+	       value = string([]rune(value)[:180])
+       }
+       value = strings.TrimSpace(strings.Trim(value, "|/\\.,:;_-"))
+       if !isUsableSearchQuery(value) {
+	       return ""
+       }
+       return value
 }
 
 func isUsableSearchQuery(value string) bool {

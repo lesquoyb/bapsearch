@@ -171,6 +171,13 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleConversationMessage(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "messages" && parts[2] == "stream" && r.Method == http.MethodPost:
 		app.handleConversationMessageStream(w, r, conversationID)
+	case len(parts) == 5 && parts[1] == "messages" && parts[3] == "regenerate" && parts[4] == "stream" && r.Method == http.MethodPost:
+		messageID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		app.handleConversationMessageRegenerateStream(w, r, conversationID, messageID)
 	case len(parts) == 3 && parts[1] == "search-more" && parts[2] == "stream" && r.Method == http.MethodPost:
 		app.handleSearchMoreStream(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "force-answer" && parts[2] == "stream" && r.Method == http.MethodPost:
@@ -610,6 +617,142 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 	writeEvent("done", "")
 }
 
+func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter, r *http.Request, conversationID, assistantMessageID int64) {
+	meta := requestMetaFromContext(r.Context())
+
+	message, err := app.conversations.TruncateConversationForRegeneration(r.Context(), meta.UserID, conversationID, assistantMessageID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == sql.ErrNoRows {
+			status = http.StatusNotFound
+		}
+		http.Error(w, "failed to regenerate message", status)
+		return
+	}
+
+	memorySummary, err := app.memory.GetUserMemory(r.Context(), meta.UserID)
+	if err != nil {
+		http.Error(w, "failed to load user memory", http.StatusInternalServerError)
+		return
+	}
+
+	history, err := app.conversations.GetMessageHistory(r.Context(), meta.UserID, conversationID, app.cfg.MaxChatMessages)
+	if err != nil {
+		http.Error(w, "failed to build prompt", http.StatusInternalServerError)
+		return
+	}
+
+	contextText, err := app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+	if err != nil {
+		http.Error(w, "failed to build search context", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	writeEvent := func(event, data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		fl.Flush()
+	}
+
+	replyMeta := RequestMeta{
+		RequestID:      meta.RequestID,
+		UserID:         meta.UserID,
+		ConversationID: conversationID,
+	}
+
+	maxChatSearchLoops := app.maxSearchLoops(r.Context())
+	var reply string
+	var reasoningBuf strings.Builder
+
+	for loop := 0; loop < maxChatSearchLoops; loop++ {
+		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
+			reasoningBuf.WriteString(token)
+			writeEvent("reasoning", token)
+		})
+
+		if err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat regeneration failed", "error", err)
+			failureMessage := chatFailureMessage(err)
+			_ = app.conversations.AddMessage(r.Context(), conversationID, "system", failureMessage)
+			writeEvent("error", failureMessage)
+			return
+		}
+
+		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, message, reply)
+		if newSearchQuery == "" {
+			break
+		}
+
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
+			"path", "message_regenerate_stream",
+			"loop", loop+1,
+			"trigger", trigger,
+			"query", newSearchQuery,
+		)
+		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+
+		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
+		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		if processErr != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			break
+		}
+
+		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if err != nil {
+			break
+		}
+	}
+
+	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_limit_reached",
+			"path", "message_regenerate_stream",
+			"max_search_loops", maxChatSearchLoops,
+		)
+		pendingQuery := detectNeedMoreSearch(reply)
+		if pendingQuery == "" {
+			pendingQuery = message
+		}
+
+		cleaned := stripNeedMoreSearch(reply)
+		if cleaned != "" {
+			encoded, _ := json.Marshal(cleaned)
+			fmt.Fprintf(w, "data: %s\n\n", encoded)
+			fl.Flush()
+			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
+		}
+
+		writeEvent("search_limit", pendingQuery)
+		writeEvent("done", "")
+		return
+	}
+
+	encoded, _ := json.Marshal(reply)
+	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fl.Flush()
+
+	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store regenerated reply", "error", err)
+	}
+
+	go app.memory.MaybeRefreshUserMemory(RequestMeta{
+		RequestID:      newRequestID(),
+		UserID:         meta.UserID,
+		ConversationID: conversationID,
+	}, meta.UserID, conversationID)
+
+	writeEvent("done", "")
+}
+
 func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
 	meta := requestMetaFromContext(r.Context())
 	query := strings.TrimSpace(r.FormValue("query"))
@@ -837,7 +980,6 @@ func (app *App) maxSearchLoops(ctx context.Context) int {
 	}
 	return loops
 }
-
 
 func (app *App) resolveFollowUpSearchQuery(ctx context.Context, meta RequestMeta, userRequest, reply string) (string, string) {
 	if explicit := detectNeedMoreSearch(reply); explicit != "" {
@@ -1252,6 +1394,62 @@ func (service *ConversationService) AddMessageWithReasoning(ctx context.Context,
         UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
     `, conversationID)
 	return err
+}
+
+// TruncateConversationForRegeneration deletes the assistant message with assistantMessageID and all
+// subsequent messages in the conversation, then returns the preceding user message content to
+// regenerate from.
+func (service *ConversationService) TruncateConversationForRegeneration(ctx context.Context, userID string, conversationID, assistantMessageID int64) (string, error) {
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	// Ensure the conversation belongs to the user.
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM conversations WHERE id = ? AND user_id = ?`, conversationID, userID).Scan(&exists); err != nil {
+		return "", err
+	}
+
+	// Ensure target message exists and is an assistant message.
+	if err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM messages WHERE conversation_id = ? AND id = ? AND role = 'assistant'
+	`, conversationID, assistantMessageID).Scan(&exists); err != nil {
+		return "", err
+	}
+
+	// Find the preceding user message to use as the prompt.
+	var prompt string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT content
+		FROM messages
+		WHERE conversation_id = ? AND id < ? AND role = 'user'
+		ORDER BY id DESC
+		LIMIT 1
+	`, conversationID, assistantMessageID).Scan(&prompt); err != nil {
+		return "", err
+	}
+
+	// Delete the assistant message and everything after it.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE conversation_id = ? AND id >= ?
+	`, conversationID, assistantMessageID); err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, conversationID); err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(prompt), nil
 }
 
 func (service *ConversationService) ListConversations(ctx context.Context, userID string) ([]ConversationListItem, error) {

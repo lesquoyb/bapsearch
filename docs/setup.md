@@ -93,24 +93,36 @@ Default mode is CPU-only.
 
 Relevant variables in `.env`:
 
-- `LLAMA_IMAGE`: llama.cpp container image
-- `LLAMA_N_GPU_LAYERS`: number of layers offloaded to GPU, `0` keeps CPU-only mode
-- `LLAMA_MAIN_GPU`: GPU index used by llama.cpp
-- `LLAMA_FLASH_ATTN`: enables flash attention when supported by the image/backend
-- `LLAMA_EXTRA_ARGS`: extra raw llama.cpp server flags
+Because bap-search runs 3 separate llama.cpp services, these settings are per-service:
+
+- `LLAMA_ANSWER_IMAGE`, `LLAMA_REWRITE_IMAGE`, `LLAMA_EMBEDDINGS_IMAGE`: llama.cpp container images
+- `LLAMA_ANSWER_N_GPU_LAYERS`, `LLAMA_REWRITE_N_GPU_LAYERS`, `LLAMA_EMBEDDINGS_N_GPU_LAYERS`: GPU offload (`0` for CPU-only; `auto` to let llama.cpp fit to VRAM; `all` to try offloading everything; or a number)
+- `LLAMA_ANSWER_MAIN_GPU`, `LLAMA_REWRITE_MAIN_GPU`, `LLAMA_EMBEDDINGS_MAIN_GPU`: GPU index used by llama.cpp when multiple GPUs are visible
+- `LLAMA_ANSWER_GPUS`, `LLAMA_REWRITE_GPUS`, `LLAMA_EMBEDDINGS_GPUS`: GPU pinning at the Docker level (e.g. `all` or `device=1`)
+- `LLAMA_ANSWER_FLASH_ATTN`, `LLAMA_REWRITE_FLASH_ATTN`, `LLAMA_EMBEDDINGS_FLASH_ATTN`: flash attention toggle
+- `LLAMA_ANSWER_EXTRA_ARGS`, `LLAMA_REWRITE_EXTRA_ARGS`, `LLAMA_EMBEDDINGS_EXTRA_ARGS`: extra raw llama.cpp server flags
 
 Example NVIDIA setup:
 
 ```bash
-LLAMA_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
-LLAMA_N_GPU_LAYERS=999
-LLAMA_FLASH_ATTN=true
+LLAMA_ANSWER_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
+LLAMA_REWRITE_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
+LLAMA_EMBEDDINGS_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
+LLAMA_ANSWER_N_GPU_LAYERS=auto
+LLAMA_REWRITE_N_GPU_LAYERS=auto
+LLAMA_EMBEDDINGS_N_GPU_LAYERS=auto
+LLAMA_ANSWER_GPUS=all
+LLAMA_REWRITE_GPUS=all
+LLAMA_EMBEDDINGS_GPUS=all
+LLAMA_ANSWER_FLASH_ATTN=true
+LLAMA_REWRITE_FLASH_ATTN=true
+LLAMA_EMBEDDINGS_FLASH_ATTN=true
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up --build
 ```
 
 Fastest path:
 
-1. Copy [.env.nvidia.example](../.env.nvidia.example) to `.env`.
+1. Copy [docker/.env.nvidia.example](../docker/.env.nvidia.example) to `docker/.env`.
 2. Start:
 
 ```bash
@@ -119,10 +131,10 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up 
 
 Notes:
 
-- [docker/docker-compose.gpu.yml](../docker/docker-compose.gpu.yml) enables `gpus: all` for the `llama` service.
-- Keep `LLAMA_N_GPU_LAYERS=0` if you want CPU-only inference even with a GPU-capable image.
+- [docker/docker-compose.gpu.yml](../docker/docker-compose.gpu.yml) enables GPU passthrough for the `llama-answer`, `llama-rewrite`, and `llama-embeddings` services.
+- Keep `LLAMA_*_N_GPU_LAYERS=0` if you want CPU-only inference even with a GPU-capable image.
 - On Windows, GPU passthrough depends on Docker Desktop, WSL2, and the NVIDIA stack being correctly installed.
-- The preset uses `LLAMA_N_GPU_LAYERS=999`, which asks llama.cpp to offload as much as possible. Lower it if VRAM is insufficient.
+- The preset uses `LLAMA_*_N_GPU_LAYERS=auto`, which lets llama.cpp pick an offload that fits your VRAM. Use `all` or an explicit number only if you know your GPU can handle it.
 
 ## Development notes
 

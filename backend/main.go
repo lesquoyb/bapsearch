@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -62,6 +63,9 @@ type App struct {
 	memory        *MemoryService
 	summarize     *SummarizeService
 	summaryJobs   chan SummaryJob
+
+	modelDownloadMu sync.Mutex
+	modelDownload   ModelDownloadStatus
 }
 
 type PageData struct {
@@ -117,6 +121,27 @@ func main() {
 	}
 
 	templates, err := template.New("root").Funcs(template.FuncMap{
+		"formatBytes": func(value int64) string {
+			if value < 0 {
+				return "?"
+			}
+
+			units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+			v := float64(value)
+			idx := 0
+			for v >= 1000.0 && idx < len(units)-1 {
+				v /= 1000.0
+				idx++
+			}
+			if idx == 0 {
+				return fmt.Sprintf("%d B", value)
+			}
+			// One decimal when < 10 for readability, otherwise whole.
+			if v < 10 {
+				return fmt.Sprintf("%.1f %s", v, units[idx])
+			}
+			return fmt.Sprintf("%.0f %s", v, units[idx])
+		},
 		"markdown": func(value string) template.HTML {
 			return renderMarkdown(value)
 		},
@@ -215,21 +240,21 @@ func main() {
 	}
 
 	conversations := &ConversationService{db: db, logger: logger, summaryTarget: cfg.SummarizeURLLimit}
-	llm := &LLMService{
-		baseURL:           cfg.LlamaURL,
-		rewriteURL:        cfg.RewriteLLMURL,
-		embeddingsURL:     cfg.EmbeddingsURL,
-		client:            &http.Client{Timeout: 90 * time.Second},
-		logger:            logger,
-		maxResponseTokens: cfg.LLMMaxResponseTokens,
-		contextTokens:     cfg.LLMContextTokens,
-		maxEmbeddingChars: cfg.MaxEmbeddingChars,
-		enableThinking:    true,
-		reasoningBudget:   2048,
-		temperature:       0.2,
-		topP:              1.0,
-		topK:              40,
-	}
+	       llm := &LLMService{
+		       baseURL:           cfg.LlamaURL,
+		       rewriteURL:        cfg.RewriteLLMURL,
+		       embeddingsURL:     cfg.EmbeddingsURL,
+		       client:            &http.Client{Timeout: 10 * time.Minute},
+		       logger:            logger,
+		       maxResponseTokens: cfg.LLMMaxResponseTokens,
+		       contextTokens:     cfg.LLMContextTokens,
+		       maxEmbeddingChars: cfg.MaxEmbeddingChars,
+		       enableThinking:    true,
+		       reasoningBudget:   2048,
+		       temperature:       0.2,
+		       topP:              1.0,
+		       topK:              40,
+	       }
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	summarizeService := &SummarizeService{
@@ -418,6 +443,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/settings", app.handleSettingsPage)
 	mux.HandleFunc("/settings/save", app.handleSettingsSave)
 	mux.HandleFunc("/settings/download", app.handleModelDownload)
+	mux.HandleFunc("/settings/download-status", app.handleModelDownloadStatus)
 	mux.HandleFunc("/memory", app.handleMemoryPage)
 	mux.HandleFunc("/llama-status", app.handleLlamaStatus)
 	mux.HandleFunc("/login", app.handleLoginPage)
@@ -443,10 +469,19 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	role := normalizeModelRole(r.URL.Query().Get("role"))
+	expectedModel := app.currentModelNameForRole(role)
+
+	type responsePayload struct {
+		Role          string `json:"role"`
+		Status        string `json:"status"`
+		ExpectedModel string `json:"expected_model,omitempty"`
+		LoadedModel   string `json:"loaded_model,omitempty"`
+		Detail        string `json:"detail,omitempty"`
+	}
 
 	parsed, err := url.Parse(app.llamaURLForRole(role))
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
+		json.NewEncoder(w).Encode(responsePayload{Role: role, Status: "error", ExpectedModel: expectedModel, Detail: "invalid llama url"})
 		return
 	}
 	baseURL := parsed.Scheme + "://" + parsed.Host
@@ -456,13 +491,13 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
+		json.NewEncoder(w).Encode(responsePayload{Role: role, Status: "error", ExpectedModel: expectedModel, Detail: "failed to build health request"})
 		return
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"role": role, "status": "error"})
+		json.NewEncoder(w).Encode(responsePayload{Role: role, Status: "error", ExpectedModel: expectedModel, Detail: err.Error()})
 		return
 	}
 	defer resp.Body.Close()
@@ -470,9 +505,10 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Status string `json:"status"`
 	}
-	json.NewDecoder(resp.Body).Decode(&body)
+	_ = json.NewDecoder(resp.Body).Decode(&body)
 
 	status := "error"
+	detail := strings.TrimSpace(body.Status)
 	switch {
 	case body.Status == "ok":
 		status = "loaded"
@@ -480,7 +516,39 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 		status = "loading"
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"role": role, "status": status})
+	loadedModel := ""
+	if status != "error" {
+		modelsCtx, modelsCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer modelsCancel()
+		mReq, err := http.NewRequestWithContext(modelsCtx, http.MethodGet, baseURL+"/v1/models", nil)
+		if err == nil {
+			mResp, err := http.DefaultClient.Do(mReq)
+			if err == nil {
+				defer mResp.Body.Close()
+				var payload struct {
+					Data []struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				}
+				if err := json.NewDecoder(mResp.Body).Decode(&payload); err == nil {
+					if len(payload.Data) > 0 {
+						loadedModel = strings.TrimSpace(payload.Data[0].ID)
+					}
+				}
+			}
+		}
+	}
+
+	if status == "error" {
+		if detail == "" {
+			detail = "unhealthy"
+		}
+		if resp.StatusCode >= http.StatusBadRequest {
+			detail = fmt.Sprintf("%s (HTTP %d)", detail, resp.StatusCode)
+		}
+	}
+
+	json.NewEncoder(w).Encode(responsePayload{Role: role, Status: status, ExpectedModel: expectedModel, LoadedModel: loadedModel, Detail: detail})
 }
 
 func (app *App) llamaURLForRole(role string) string {

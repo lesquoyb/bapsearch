@@ -157,7 +157,7 @@ body.sidebar-collapsed .app-shell {
 }
 
 body.sidebar-collapsed .brand span,
-body.sidebar-collapsed .user-pill,
+body.sidebar-collapsed .sidebar-user-row,
 body.sidebar-collapsed .sidebar-section,
 body.sidebar-collapsed .llama-status,
 body.sidebar-collapsed .sidebar-settings-link {
@@ -241,8 +241,25 @@ button:disabled {
   cursor: pointer;
   transition: background 0.15s;
 }
+
+.sidebar-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.sidebar-user-row .user-pill {
+  margin-top: 0;
+}
 a.user-pill:hover {
   background: rgba(255, 233, 193, 0.85);
+}
+
+progress {
+  width: 100%;
+  margin-top: 10px;
 }
 
 /* Toast notification (auto-dismiss) */
@@ -876,6 +893,25 @@ textarea {
   color: var(--muted);
 }
 
+.message-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.message-regenerate-button {
+  padding: 6px 10px;
+  min-width: 36px;
+  min-height: 32px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+
+.message-head .message-role {
+  margin-bottom: 0;
+}
+
 .reasoning-block {
   margin: 4px 0 10px;
   border: 1px solid rgba(27, 29, 30, 0.08);
@@ -1318,8 +1354,8 @@ textarea {
 /* Sidebar logout */
 
 .sidebar-logout-form {
-  display: inline;
-  margin-left: 4px;
+  display: block;
+  margin: 0;
 }
 
 .sidebar-logout-button {

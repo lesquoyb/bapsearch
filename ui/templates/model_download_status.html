@@ -1,0 +1,31 @@
+{{ define "model_download_status" }}
+{{ if eq .Status.State "downloading" }}
+  <article class="card">
+    <div class="eyebrow">Model download</div>
+    <h3>Downloading {{ .Status.Filename }}</h3>
+    {{ if gt .Status.TotalBytes 0 }}
+      <p class="muted">{{ .Percent }}% ({{ formatBytes .Status.BytesDownloaded }} / {{ formatBytes .Status.TotalBytes }})</p>
+      <progress value="{{ .Status.BytesDownloaded }}" max="{{ .Status.TotalBytes }}"></progress>
+    {{ else }}
+      <p class="muted">{{ formatBytes .Status.BytesDownloaded }} downloaded (total size unknown)</p>
+    {{ end }}
+    {{ if .Status.Error }}
+      <p class="muted">{{ .Status.Error }}</p>
+    {{ end }}
+    <p class="muted">{{ .Status.URL }}</p>
+  </article>
+{{ else if eq .Status.State "done" }}
+  <article class="card">
+    <div class="eyebrow">Model download</div>
+    <h3>Downloaded {{ .Status.Filename }}</h3>
+    <p class="muted">{{ formatBytes .Status.BytesDownloaded }}</p>
+  </article>
+{{ else if eq .Status.State "error" }}
+  <article class="card">
+    <div class="eyebrow">Model download</div>
+    <h3>Download failed</h3>
+    {{ if .Status.Filename }}<p class="muted">{{ .Status.Filename }}</p>{{ end }}
+    {{ if .Status.Error }}<p class="muted">{{ .Status.Error }}</p>{{ end }}
+  </article>
+{{ end }}
+{{ end }}

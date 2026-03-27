@@ -496,19 +496,172 @@
     });
   })();
 
+  (function () {
+    document.addEventListener('click', async function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('.message-regenerate-button') : null;
+      if (!btn) return;
+
+      e.preventDefault();
+      if (btn.disabled) return;
+
+      var streamURL = btn.dataset.regenerateStreamUrl;
+      var refreshURL = btn.dataset.refreshUrl;
+      if (!streamURL || !refreshURL) return;
+
+      btn.disabled = true;
+
+      var chatMessages = document.getElementById('chat-messages');
+      if (!chatMessages) {
+        btn.disabled = false;
+        return;
+      }
+
+      var anchorArticle = btn.closest('article.message');
+      var thread = anchorArticle ? anchorArticle.parentElement : chatMessages.querySelector('.chat-thread');
+
+      // Remove the selected assistant message and everything after it (UI mirrors server truncation).
+      if (anchorArticle && thread) {
+        var cur = anchorArticle;
+        while (cur) {
+          var next = cur.nextElementSibling;
+          try { thread.removeChild(cur); } catch (_) {}
+          cur = next;
+        }
+      }
+
+      if (!thread) {
+        thread = document.createElement('div');
+        thread.className = 'chat-thread';
+        chatMessages.appendChild(thread);
+      }
+
+      // Append streaming assistant bubble
+      var aBody = document.createElement('div');
+      aBody.className = 'message-body markdown-body';
+      aBody.textContent = 'Regenerating...';
+      var aBubble = document.createElement('article');
+      aBubble.className = 'message message-assistant';
+      aBubble.innerHTML = '<div class="message-head"><div class="message-role">assistant</div></div>';
+      aBubble.appendChild(aBody);
+      thread.appendChild(aBubble);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+
+      var aReasoning = null;
+      var reasoningAccumulated = '';
+      var searchLimitPending = false;
+      var accumulated = '';
+
+      try {
+        var response = await fetch(streamURL, { method: 'POST', body: new FormData() });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+
+        while (true) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          buf += decoder.decode(chunk.value, { stream: true });
+
+          var parts = buf.split('\n\n');
+          buf = parts.pop();
+
+          for (var i = 0; i < parts.length; i++) {
+            var lines = parts[i].split('\n');
+            var evtName = 'message';
+            var dataLine = '';
+            for (var j = 0; j < lines.length; j++) {
+              if (lines[j].startsWith('event: ')) evtName = lines[j].slice(7);
+              else if (lines[j].startsWith('data: ')) dataLine = lines[j].slice(6);
+            }
+
+            if (evtName === 'done') {
+              if (!searchLimitPending) {
+                var html = await fetch(refreshURL).then(function (r) { return r.text(); });
+                chatMessages.innerHTML = html;
+                bapRenderMath(chatMessages);
+              }
+            } else if (evtName === 'search_limit') {
+              try {
+                var pendingQuery = JSON.parse(dataLine);
+                var idx = streamURL.indexOf('/messages/');
+                var basePath = idx > -1 ? streamURL.slice(0, idx) : '';
+                bapShowSearchLimitPrompt(aBody, pendingQuery, chatMessages, refreshURL, basePath);
+                searchLimitPending = true;
+              } catch (_) {}
+            } else if (evtName === 'reasoning') {
+              try {
+                var rToken = JSON.parse(dataLine);
+                reasoningAccumulated += rToken;
+                if (!aReasoning) {
+                  var details = document.createElement('details');
+                  details.className = 'reasoning-block';
+                  details.open = true;
+                  details.innerHTML = '<summary>Thinking…</summary>';
+                  var pre = document.createElement('pre');
+                  pre.className = 'reasoning-content';
+                  details.appendChild(pre);
+                  aBubble.insertBefore(details, aBody);
+                  aReasoning = pre;
+                }
+                aReasoning.textContent = reasoningAccumulated;
+                bapAutoScrollReasoning(aReasoning);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+              } catch (_) {}
+            } else if (evtName === 'error') {
+              try { aBody.textContent = JSON.parse(dataLine); } catch (_) { aBody.textContent = dataLine; }
+              aBubble.className = 'message message-system';
+            } else if (dataLine) {
+              try {
+                accumulated += JSON.parse(dataLine);
+                aBody.textContent = accumulated;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+              } catch (_) {}
+            }
+          }
+        }
+      } catch (err) {
+        aBody.textContent = 'Connection error: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+
   function bapEscapeHtml(text) {
     return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   (function () {
-    var LABELS = { loaded: 'Model ready', loading: 'Loading model...', error: 'Model error', unknown: 'Checking...' };
+    var ROLE_LABELS = { answer: 'Answer', rewrite: 'Rewrite', embeddings: 'Embeddings' };
+    var STATUS_LABELS = { loaded: 'ready', loading: 'loading', error: 'error', unknown: 'checking' };
 
-    function applyLlamaStatus(el, status) {
+    function applyLlamaStatus(el, data) {
+      if (!el) return;
+
+      var role = (el.dataset.role || (data && data.role) || 'answer');
+      var roleLabel = ROLE_LABELS[role] || role;
+      var status = (data && data.status) ? data.status : 'error';
+      var expectedModel = (data && data.expected_model) ? data.expected_model : '';
+      var loadedModel = (data && data.loaded_model) ? data.loaded_model : '';
+      var detail = (data && data.detail) ? data.detail : '';
+
       var dot = el.querySelector('.llama-status-dot');
       var label = el.querySelector('.llama-status-label');
       if (dot) dot.className = 'llama-status-dot llama-status-dot-' + status;
-      if (label) label.textContent = LABELS[status] || status;
-      el.title = LABELS[status] || status;
+
+      var statusLabel = STATUS_LABELS[status] || status;
+      var modelLabel = loadedModel || expectedModel;
+      var labelText = roleLabel + ': ' + statusLabel;
+      if (modelLabel) labelText += ' • ' + modelLabel;
+      if (label) label.textContent = labelText;
+
+      var titleLines = [labelText];
+      if (expectedModel) titleLines.push('Expected: ' + expectedModel);
+      if (loadedModel) titleLines.push('Loaded: ' + loadedModel);
+      if (detail) titleLines.push('Detail: ' + detail);
+      el.title = titleLines.join('\n');
     }
 
     function pollLlamaStatus() {
@@ -516,8 +669,8 @@
         var role = el.dataset.role || 'answer';
         fetch('/llama-status?role=' + encodeURIComponent(role))
           .then(function (r) { return r.json(); })
-          .then(function (data) { applyLlamaStatus(el, data.status || 'error'); })
-          .catch(function () { applyLlamaStatus(el, 'error'); });
+          .then(function (data) { applyLlamaStatus(el, data || { role: role, status: 'error' }); })
+          .catch(function (err) { applyLlamaStatus(el, { role: role, status: 'error', detail: err && err.message ? err.message : 'fetch failed' }); });
       });
     }
 
@@ -572,10 +725,12 @@
     <button class="ghost-button sidebar-toggle icon-button" type="button" data-sidebar-toggle aria-expanded="true" aria-label="Toggle conversations sidebar">☰</button>
   </div>
 
-  <a class="user-pill" href="/memory" title="View persistent memory">{{ .UserID }}</a>
-  <form class="sidebar-logout-form" action="/logout" method="post">
-    <button class="ghost-button sidebar-logout-button icon-button" type="submit" title="Sign out" aria-label="Sign out">⏻</button>
-  </form>
+  <div class="sidebar-user-row">
+    <a class="user-pill" href="/memory" title="View persistent memory">{{ .UserID }}</a>
+    <form class="sidebar-logout-form" action="/logout" method="post">
+      <button class="ghost-button sidebar-logout-button icon-button" type="submit" title="Sign out" aria-label="Sign out">⏻</button>
+    </form>
+  </div>
 
   <div class="sidebar-section sidebar-main-section">
     <h2>Conversations</h2>
@@ -601,7 +756,15 @@
   </div>
 
   <div class="sidebar-footer">
-    <div class="llama-status" title="Model not checked yet">
+    <div class="llama-status" data-role="answer" title="Model not checked yet">
+      <span class="llama-status-dot llama-status-dot-unknown"></span>
+      <span class="llama-status-label">Checking...</span>
+    </div>
+    <div class="llama-status" data-role="rewrite" title="Model not checked yet">
+      <span class="llama-status-dot llama-status-dot-unknown"></span>
+      <span class="llama-status-label">Checking...</span>
+    </div>
+    <div class="llama-status" data-role="embeddings" title="Model not checked yet">
       <span class="llama-status-dot llama-status-dot-unknown"></span>
       <span class="llama-status-label">Checking...</span>
     </div>
@@ -685,8 +848,19 @@
 {{ if .Messages }}
 <div class="chat-thread">
   {{ range .Messages }}
-  <article class="message message-{{ .Role }}">
-    <div class="message-role">{{ .Role }}</div>
+  <article class="message message-{{ .Role }}" data-message-id="{{ .ID }}" data-message-role="{{ .Role }}">
+    <div class="message-head">
+      <div class="message-role">{{ .Role }}</div>
+      {{ if eq .Role "assistant" }}
+      <button
+        type="button"
+        class="ghost-button icon-button message-regenerate-button"
+        title="Regenerate this assistant message (deletes all following messages)"
+        aria-label="Regenerate"
+        data-regenerate-stream-url="/conversations/{{ $.ID }}/messages/{{ .ID }}/regenerate/stream"
+        data-refresh-url="/conversations/{{ $.ID }}/messages">↻</button>
+      {{ end }}
+    </div>
     {{ if .Reasoning }}
     <details class="reasoning-block">
       <summary>Thinking…</summary>

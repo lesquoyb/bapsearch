@@ -26,6 +26,17 @@ EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 POLL_SECONDS="${MODEL_POLL_SECONDS:-5}"
 AUTO_RELOAD_MODEL="${LLAMA_AUTO_RELOAD_MODEL:-true}"
 
+normalize_ngl() {
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | xargs)"
+  # Legacy: many docs used 999 to mean "offload as much as possible".
+  # llama.cpp now supports explicit 'auto'/'all'. Prefer 'auto' so the server
+  # can fit to the available VRAM.
+  if [ "$value" = "999" ]; then
+    value="auto"
+  fi
+  printf '%s' "$value"
+}
+
 is_true() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     true|1|yes|on)
@@ -71,8 +82,9 @@ start_server() {
     --threads "$THREADS" \
     --parallel "$PARALLEL"
 
-  if [ "$N_GPU_LAYERS" != "0" ]; then
-    set -- "$@" --n-gpu-layers "$N_GPU_LAYERS" --main-gpu "$MAIN_GPU"
+  ngl="$(normalize_ngl "$N_GPU_LAYERS")"
+  if [ -n "$ngl" ] && [ "$ngl" != "0" ] && [ "$ngl" != "off" ] && [ "$ngl" != "false" ] && [ "$ngl" != "no" ]; then
+    set -- "$@" --n-gpu-layers "$ngl" --main-gpu "$MAIN_GPU"
   fi
 
   case "$(printf '%s' "$FLASH_ATTN" | tr '[:upper:]' '[:lower:]')" in

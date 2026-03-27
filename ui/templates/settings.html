@@ -265,6 +265,12 @@
       <div class="section-header"><div>
         <div class="eyebrow">Download a model</div>
       </div></div>
+
+      <div id="model-download-status"
+        hx-get="/settings/download-status"
+        hx-trigger="load, every 2s"
+        hx-swap="innerHTML"></div>
+
       <form class="stack-form" action="/settings/download" method="post">
         <label for="url">Direct GGUF URL</label>
         <input id="url" name="url" type="url" placeholder="https://huggingface.co/.../model.gguf">

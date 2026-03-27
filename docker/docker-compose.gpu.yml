@@ -1,9 +1,9 @@
 services:
   llama-answer:
-    gpus: all
+    gpus: "${LLAMA_ANSWER_GPUS:-all}"
 
   llama-rewrite:
-    gpus: all
+    gpus: "${LLAMA_REWRITE_GPUS:-all}"
 
   llama-embeddings:
-    gpus: all
+    gpus: "${LLAMA_EMBEDDINGS_GPUS:-all}"
