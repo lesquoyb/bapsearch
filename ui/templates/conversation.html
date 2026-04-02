@@ -29,79 +29,86 @@
       </form>
     </section>
 
-    <section class="section-block">
-      <div class="section-header section-header-inline">
-        <div>
-          <h2>Raw results</h2>
-          <p class="muted">Automatically reordered once ranking is ready.</p>
-        </div>
-        {{ if .Conversation.EngineStatus }}
-        <div class="engine-status-line engine-status-inline" aria-label="Search engine status">
-          {{ range .Conversation.EngineStatus }}
-          <span class="engine-status-chip engine-status-{{ .Status }}" {{ if .Detail }}title="{{ .Detail }}"{{ end }}>{{ engineStatusLabel . }}</span>
+    <div id="conversation-body" class="conversation-body{{ if .Conversation.OverviewSummary }} conversation-body--split{{ end }}">
+
+      <section class="section-block">
+        <div class="section-header section-header-inline">
+          {{ if .Conversation.EngineStatus }}
+          <div class="engine-status-line engine-status-inline" aria-label="Search engine status">
+            {{ range .Conversation.EngineStatus }}
+            <span class="engine-status-chip engine-status-{{ .Status }}" {{ if .Detail }}title="{{ .Detail }}"{{ end }}>{{ engineStatusLabel . }}</span>
+            {{ end }}
+          </div>
           {{ end }}
         </div>
-        {{ end }}
-      </div>
-      <div id="results-panel" hx-get="/conversations/{{ .Conversation.ID }}/results" hx-trigger="load, every 5s" hx-swap="innerHTML" hx-indicator="#summary-loading">
-        {{ template "search_results" .Conversation }}
-      </div>
-    </section>
-
-    <section class="section-block" id="chat">
-      <div class="section-header">
-        <div>
-          <h2>Grounded answer</h2>
+        <div id="results-panel"
+          data-results-limit="{{ .Conversation.ResultsDisplayLimit }}"
+          data-conversation-id="{{ .Conversation.ID }}"
+          hx-get="/conversations/{{ .Conversation.ID }}/results"
+          hx-trigger="load, every 5s"
+          hx-swap="innerHTML"
+          hx-indicator="#summary-loading"
+          hx-on:htmx:after-swap="bapApplyResultsLimit(this)">
+          {{ template "search_results" .Conversation }}
         </div>
-        <div class="section-header-actions">
-          <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
-            <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
-          </form>
-          <small title="Current answer model">{{ if .CurrentModel }}◦ {{ .CurrentModel }}{{ else }}◦ No model selected{{ end }}</small>
+      </section>
+
+      <section class="section-block" id="chat">
+        <div class="section-header">
+          <div>
+            <h2>Grounded answer</h2>
+          </div>
+          <div class="section-header-actions">
+            <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
+              <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
+            </form>
+            <small title="Current answer model">{{ if .CurrentModel }}◦ {{ .CurrentModel }}{{ else }}◦ No model selected{{ end }}</small>
+          </div>
         </div>
-      </div>
 
-      <div id="summary-spinner" class="panel-loading-row" aria-live="polite"{{ if .Conversation.OverviewSummary }} style="display:none"{{ end }}>
-        <span class="spinner" aria-hidden="true"></span>
-        <span id="summary-spinner-text">Preparing the ranked sources and the final grounded answer...</span>
-      </div>
-
-      <div id="summary-panel"
-        hx-get="/conversations/{{ .Conversation.ID }}/summaries"
-        hx-trigger="load, every 5s [!document.querySelector('#summary-panel .summary-ready-flag')]"
-        hx-swap="innerHTML"
-        hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); document.getElementById('summary-spinner').style.display = done ? 'none' : ''; if (done) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
-        {{ template "summaries" .Conversation }}
-      </div>
-
-      <div id="chat-messages">
-        {{ template "chat_messages" .Conversation }}
-      </div>
-
-      <div id="initial-answer-stream"
-        data-stream-url="/conversations/{{ .Conversation.ID }}/answer/stream"
-        data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
-        data-enabled="{{ if .Conversation.OverviewSummary }}false{{ else }}true{{ end }}"></div>
-
-      <div class="panel-loading-row htmx-indicator" id="chat-loading" aria-live="polite">
-        <span class="spinner" aria-hidden="true"></span>
-        <span>Generating the reply...</span>
-      </div>
-
-      <form class="chat-form"
-        id="chat-form"
-        data-stream-url="/conversations/{{ .Conversation.ID }}/messages/stream"
-        data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
-        action="/conversations/{{ .Conversation.ID }}/messages"
-        method="post">
-        <label for="message">Follow-up question</label>
-        <textarea id="message" name="message" rows="3" placeholder="Compare the sources and explain the trade-offs."></textarea>
-        <div class="chat-actions">
-          <p class="muted">Reply uses the summary, conversation history, and saved memory.</p>
-          <button type="submit" data-loading-label="Waiting...">Send</button>
+        <div id="summary-spinner" class="panel-loading-row" aria-live="polite"{{ if .Conversation.OverviewSummary }} style="display:none"{{ end }}>
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="summary-spinner-text">Preparing the ranked sources and the final grounded answer...</span>
         </div>
-      </form>
-    </section>
+
+        <div id="summary-panel"
+          hx-get="/conversations/{{ .Conversation.ID }}/summaries"
+          hx-trigger="load, every 5s [!document.querySelector('#summary-panel .summary-ready-flag')]"
+          hx-swap="innerHTML"
+          hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); document.getElementById('summary-spinner').style.display = done ? 'none' : ''; if (done) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
+          {{ template "summaries" .Conversation }}
+        </div>
+
+        <div id="chat-messages">
+          {{ template "chat_messages" .Conversation }}
+        </div>
+
+        <div id="initial-answer-stream"
+          data-stream-url="/conversations/{{ .Conversation.ID }}/answer/stream"
+          data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
+          data-enabled="{{ if .Conversation.OverviewSummary }}false{{ else }}true{{ end }}"></div>
+
+        <div class="panel-loading-row htmx-indicator" id="chat-loading" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Generating the reply...</span>
+        </div>
+
+        <form class="chat-form"
+          id="chat-form"
+          data-stream-url="/conversations/{{ .Conversation.ID }}/messages/stream"
+          data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
+          action="/conversations/{{ .Conversation.ID }}/messages"
+          method="post">
+          <label for="message">Follow-up question</label>
+          <textarea id="message" name="message" rows="3" placeholder="Compare the sources and explain the trade-offs."></textarea>
+          <div class="chat-actions">
+            <p class="muted">Reply uses the summary, conversation history, and saved memory.</p>
+            <button type="submit" data-loading-label="Waiting...">Send</button>
+          </div>
+        </form>
+      </section>
+
+    </div>
   </main>
 </div>
 {{ template "footer" . }}

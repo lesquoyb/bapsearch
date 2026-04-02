@@ -138,8 +138,6 @@ services:
       dockerfile: docker/backend.Dockerfile
     restart: unless-stopped
     depends_on:
-      # searxng:
-      #   condition: service_healthy
       llama-answer:
         condition: service_started
       llama-rewrite:
@@ -165,7 +163,7 @@ services:
       BAP_FETCH_WORKERS: ${BAP_FETCH_WORKERS:-3}
       BAP_SUMMARY_WORKERS: ${BAP_SUMMARY_WORKERS:-1}
       BAP_MAX_EXTRACT_CHARS: ${BAP_MAX_EXTRACT_CHARS:-12000}
-      BAP_MAX_EMBEDDING_CHARS: ${BAP_MAX_EMBEDDING_CHARS:-1800}
+      BAP_MAX_EMBEDDING_CHARS: ${BAP_MAX_EMBEDDING_CHARS:-1600}
       BAP_CHAT_CONTEXT_CHARS: ${BAP_CHAT_CONTEXT_CHARS:-4200}
       BAP_MAX_CHAT_MESSAGES: ${BAP_MAX_CHAT_MESSAGES:-8}
       BAP_LLM_MAX_TOKENS: ${BAP_LLM_MAX_TOKENS:-700}
@@ -242,7 +240,7 @@ services:
       LLAMA_N_GPU_LAYERS: ${LLAMA_EMBEDDINGS_N_GPU_LAYERS:-0}
       LLAMA_MAIN_GPU: ${LLAMA_EMBEDDINGS_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_EMBEDDINGS_FLASH_ATTN:-false}
-      LLAMA_EXTRA_ARGS: ${LLAMA_EMBEDDINGS_EXTRA_ARGS:---embeddings --pooling mean --batch-size 2048 --ubatch-size 512}
+      LLAMA_EXTRA_ARGS: ${LLAMA_EMBEDDINGS_EXTRA_ARGS:---embeddings --pooling mean --batch-size 2048 --ubatch-size 2048}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
@@ -263,12 +261,6 @@ services:
       - 8.8.8.8
     volumes:
       - ./searxng-settings.yml:/etc/searxng/settings.yml
-    # healthcheck:
-    #   test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 10
-    #   start_period: 15s
     networks:
       - public
       - internal

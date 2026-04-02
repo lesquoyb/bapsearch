@@ -117,21 +117,6 @@
           <h2>Web search and content extraction</h2>
         </div></div>
         <article class="card">
-          <label for="search_engine">Search engine</label>
-          <p class="muted">Which search backend to use for web queries. SearXNG is self-hosted and private.</p>
-          <select id="search_engine" name="search_engine">
-            <option value="searxng" {{ if eq (index .Settings "search_engine") "searxng" }}selected{{ end }}>SearXNG</option>
-            <option value="bing" {{ if eq (index .Settings "search_engine") "bing" }}selected{{ end }}>Bing</option>
-            <option value="google" {{ if eq (index .Settings "search_engine") "google" }}selected{{ end }}>Google</option>
-          </select>
-
-          <label for="search_count">Results per search</label>
-          <p class="muted">Number of search results to fetch per query. More results give broader coverage but increase processing time.</p>
-          <div class="setting-row">
-            <input type="number" step="1" min="1" max="50" id="search_count" name="search_count" value="{{ index .Settings "search_count" }}" data-default="8">
-            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
-          </div>
-
           <label for="max_search_loops">Max iterative search loops</label>
           <p class="muted">How many times the model can issue follow-up searches to refine its answer. When this limit is reached, the user is prompted to continue or stop.</p>
           <div class="setting-row">
@@ -162,22 +147,6 @@
         </article>
       </section>
 
-      <!-- Embedding / similarity -->
-      <section class="section-block">
-        <div class="section-header"><div>
-          <div class="eyebrow">Embedding parameters</div>
-          <h2>Similarity filtering</h2>
-        </div></div>
-        <article class="card">
-          <label for="similarity_threshold">Similarity threshold</label>
-          <p class="muted">Minimum cosine similarity score (0–1) for a search result to be considered relevant. Higher values are stricter — only closely matching results are kept. Lower values include more results but may add noise.</p>
-          <div class="setting-row">
-            <input type="number" step="0.01" min="0" max="1" id="similarity_threshold" name="similarity_threshold" value="{{ index .Settings "similarity_threshold" }}" data-default="0.5">
-            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
-          </div>
-        </article>
-      </section>
-
       <!-- Chat parameters -->
       <section class="section-block">
         <div class="section-header"><div>
@@ -188,7 +157,7 @@
           <label for="chat_context_chars">Context chars for chat</label>
           <p class="muted">Maximum characters of previous conversation context included when generating a follow-up reply. Larger values give the model more memory but use more of the context window.</p>
           <div class="setting-row">
-            <input type="number" step="100" min="500" max="50000" id="chat_context_chars" name="chat_context_chars" value="{{ index .Settings "chat_context_chars" }}" data-default="4200">
+            <input type="number" step="100" min="500" max="50000" id="chat_context_chars" name="chat_context_chars" value="{{ index .Settings "chat_context_chars" }}" data-default="12000">
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
 
@@ -203,6 +172,13 @@
           <p class="muted">Maximum number of top-ranked documents included as context when generating an answer. More documents give the model more material to cite but use more of the context window.</p>
           <div class="setting-row">
             <input type="number" step="1" min="1" max="20" id="context_doc_count" name="context_doc_count" value="{{ index .Settings "context_doc_count" }}" data-default="5">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="results_display_limit">Results shown by default</label>
+          <p class="muted">Number of search result cards shown initially. The rest are hidden behind a "show more" button.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="100" id="results_display_limit" name="results_display_limit" value="{{ index .Settings "results_display_limit" }}" data-default="10">
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
         </article>

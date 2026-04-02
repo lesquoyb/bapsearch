@@ -21,11 +21,15 @@
 - Internal-only metasearch engine.
 - No public port published by Compose.
 
-### llama
+### llama-answer, llama-rewrite, llama-embeddings
 
-- llama.cpp server container.
-- Loads the selected GGUF model from the role-specific files in `/models`.
-- Watches the selected model file and restarts the inference process when the assigned model changes.
+Three dedicated llama.cpp server containers, one per role.
+
+- `llama-answer`: streams grounded answers and drives the main chat pipeline.
+- `llama-rewrite`: rewrites search queries to improve SearXNG results.
+- `llama-embeddings`: generates document and query embeddings for reranking.
+
+Each container watches its role-specific model file (`current-model.txt`, `current-rewrite-model.txt`, `current-embedding-model.txt`) and reloads the inference process when the file changes.
 
 ## Search workflow
 

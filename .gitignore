@@ -9,3 +9,4 @@ backend/backend.exe
 docker/.env
 .env
 models/current-model.txt
+/.claude

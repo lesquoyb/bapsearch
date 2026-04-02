@@ -1,145 +1,163 @@
 # API
 
-## Public browser routes
+## Browser routes
 
 ### GET /
 
-Search landing page.
-
-Response:
-
-- HTML page with search form
-- conversation sidebar
-- links to model management
+Search landing page. Returns the search form with conversation sidebar.
 
 ### POST /search
 
-Creates a conversation and performs a SearXNG search.
+Creates a conversation and kicks off the search pipeline.
 
-Form fields:
+Form field:
 
 - `q`: search query
 
-Behavior:
-
-- ensures the authenticated user exists
-- creates a conversation row
-- stores the initial user message
-- calls `GET /search?q=<query>&format=json` on SearXNG
-- stores raw search results
-- enqueues async summarization
-- redirects to `/conversations/{id}`
+Behavior: ensures the authenticated user exists, creates a conversation, stores the initial user message, fires SearXNG immediately, enqueues async summarization, and redirects to `/conversations/{id}`.
 
 ### GET /conversations/{id}
 
-Conversation page.
+Conversation view. Returns raw search results, summaries panel, and chat thread.
 
-Response:
+### GET /conversations/{id}/results
 
-- raw stored search results
-- summaries panel
-- chat thread
-- follow-up chat form
+HTMX partial for the raw results block. Can be polled while background work runs.
 
 ### GET /conversations/{id}/summaries
 
-HTMX partial endpoint for the summaries panel.
+HTMX partial for the summaries panel. Returns the current state of all summary jobs.
 
-Behavior:
+### POST /conversations/{id}/summaries/regenerate
 
-- returns only the summaries fragment
-- can be polled every few seconds while background work is still running
+Discards existing summaries and re-runs the full fetch, extract, embed, and rerank pipeline from stored search results.
+
+### GET /conversations/{id}/answer/stream
+
+SSE stream for the initial grounded answer. The client connects once and receives the streamed response until completion or a `NEED_MORE_SEARCH` signal.
+
+### GET /conversations/{id}/messages
+
+Returns the messages fragment for HTMX partial refreshes.
 
 ### POST /conversations/{id}/messages
 
-Adds a user follow-up message and generates an assistant response.
+Adds a follow-up user message and saves it. The client then connects to `/messages/stream` for the reply.
 
-Form fields:
+Form field:
 
 - `message`: follow-up question
 
-Prompt inputs:
+### POST /conversations/{id}/messages/stream
 
-- persistent user memory
-- summaries
-- extracted page text
-- recent conversation history
-- raw search results as fallback when summaries are not ready yet
+SSE stream for an assistant reply to the most recent user message. Uses persistent memory, stored summaries, extracted text, and recent conversation history.
 
-Response:
+### POST /conversations/{id}/messages/{message_id}/regenerate/stream
 
-- full page redirect for normal requests
-- chat fragment for HTMX requests
+SSE stream that regenerates the specified assistant message. Truncates the thread at that message and re-streams.
+
+### POST /conversations/{id}/search-more/stream
+
+SSE stream for an iterative search round. Runs a new SearXNG query, fetches and summarizes new results, then streams an updated answer.
+
+### POST /conversations/{id}/force-answer/stream
+
+SSE stream that forces a grounded answer with the sources available, skipping the `NEED_MORE_SEARCH` check.
+
+### POST /conversations/{id}/delete
+
+Deletes the conversation and all associated messages, results, and summaries.
 
 ### GET /settings
 
-Unified settings page.
-
-Response:
-
-- detected GGUF files
-- currently assigned answer, rewrite, and embedding models
-- settings form
-- prompt editors
-- model download form
+Unified settings page. Returns the detected GGUF files, current role assignments, settings form, prompt editors, and model download form.
 
 ### POST /settings
 
-Saves the current settings form.
+Saves the settings form.
 
 Form fields include:
 
 - `llm_model`, `rewrite_model`, `embedding_model`
-- generation and search settings
-- prompt fields
+- LLM sampling parameters (temperature, top_p, top_k, max_tokens)
+- Search pipeline parameters (summarize_url_limit, fetch_workers, context_doc_count, etc.)
+- Prompt fields (prompt_summarize, prompt_synthesize, prompt_chat, prompt_memory)
+- Reasoning settings (enable_thinking, reasoning_budget)
 
-Behavior:
-
-- writes model assignments to the role-specific files in `/models`
-- stores the remaining settings in SQLite
-- reloads in-memory prompts from the database
+Behavior: writes model assignments to the role-specific files in `/models`, stores remaining settings in SQLite, reloads in-memory prompts and settings.
 
 ### POST /settings/download
 
 Downloads a GGUF model file into the shared models volume.
 
-Form fields:
+Form field:
 
 - `url`: direct download URL ending in `.gguf`
 
-Behavior:
+Behavior: streams the upstream response into `/models/<filename>.part`, atomically renames the file on completion.
 
-- streams the upstream response into `/models/<filename>.part`
-- atomically renames the temporary file after completion
+### GET /settings/download-status
+
+HTMX partial that returns the current download progress indicator.
+
+### GET /memory
+
+User memory editor page.
+
+### POST /memory
+
+Saves the user memory text.
+
+Form field:
+
+- `memory`: updated memory content
+
+### GET /login
+
+Login form.
+
+### POST /login
+
+Authenticates with username and password. Sets a signed session cookie on success.
+
+### GET /register
+
+Registration form.
+
+### POST /register
+
+Creates a new user account. Accepts username and password.
+
+### POST /logout
+
+Clears the session cookie and redirects to `/login`.
 
 ### GET /healthz
 
-Simple backend health check.
+Backend health check. Returns `200 ok` when the SQLite database is reachable.
 
-Checks:
+### GET /llama-status
 
-- SQLite connectivity
+Returns a JSON status object for the specified llama.cpp service.
 
-Response:
+Query parameter:
 
-- `200 ok` when healthy
+- `role`: `answer`, `rewrite`, or `embeddings`
+
+Response fields:
+
+- `role`, `status` (`loaded`, `loading`, `error`), `expected_model`, `loaded_model`, `detail`
 
 ## Internal upstreams
 
 ### SearXNG
 
-The backend uses:
-
-- `GET /search?q=<query>&format=json`
+`GET /search?q=<query>&format=json`
 
 ### llama.cpp
 
-The backend uses:
+`POST /v1/chat/completions` — used for answer generation, query rewriting, summarization, memory refresh.
 
-- `POST /v1/chat/completions`
+`POST /v1/embeddings` — used for document and query embedding.
 
-Expected usage:
-
-- model is already loaded in the llama.cpp service
-- backend does not load a model per request
-- all inference requests are plain chat-completion style calls
+`GET /health`, `GET /v1/models` — polled by `/llama-status`.

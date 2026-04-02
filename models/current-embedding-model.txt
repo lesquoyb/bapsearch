@@ -1,1 +1,1 @@
-Qwen3.5-0.8B.Q8_0.gguf
+LaMini-Flan-T5-77M.F16.gguf

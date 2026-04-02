@@ -29,11 +29,12 @@ type ConversationListItem struct {
 }
 
 type MessageRecord struct {
-	ID        int64
-	Role      string
-	Content   string
-	Reasoning string
-	Timestamp time.Time
+	ID            int64
+	Role          string
+	Content       string
+	Reasoning     string
+	Timestamp     time.Time
+	SkipInDisplay bool
 }
 
 type SummaryRecord struct {
@@ -67,6 +68,7 @@ type ConversationView struct {
 	ReadySummaryCount    int
 	SummaryTarget        int
 	OverviewSummary      string
+	ResultsDisplayLimit  int
 }
 
 func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +200,7 @@ func (app *App) handleConversationView(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "failed to load conversation", status)
 		return
 	}
+	conversation.ResultsDisplayLimit = app.cfg.ResultsDisplayLimit
 
 	app.render(w, "conversation", PageData{
 		AppName:       "bap-search",
@@ -249,6 +252,7 @@ func (app *App) handleConversationResults(w http.ResponseWriter, r *http.Request
 		http.Error(w, "failed to load results", http.StatusInternalServerError)
 		return
 	}
+	conversation.ResultsDisplayLimit = app.cfg.ResultsDisplayLimit
 	app.renderTemplate(w, "search_results", conversation)
 }
 
@@ -412,6 +416,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		}
 
 		searchLoop++
+		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "answer_stream",
 			"loop", searchLoop,
@@ -419,7 +424,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 			"query", newSearchQuery,
 			"current_sources", len(currentSources),
 		)
-		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+		writeEvent("search_query", newSearchQuery)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, nil)
 		newSources, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
@@ -556,13 +561,14 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 			break
 		}
 
+		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_stream",
 			"loop", loop+1,
 			"trigger", trigger,
 			"query", newSearchQuery,
 		)
-		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+		writeEvent("search_query", newSearchQuery)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
 		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
@@ -692,13 +698,14 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 			break
 		}
 
+		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_regenerate_stream",
 			"loop", loop+1,
 			"trigger", trigger,
 			"query", newSearchQuery,
 		)
-		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+		writeEvent("search_query", newSearchQuery)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
 		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
@@ -783,8 +790,6 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 
 	replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
 
-	writeEvent("status", fmt.Sprintf("Searching: %s", query))
-
 	history, err := app.conversations.GetMessageHistory(r.Context(), meta.UserID, conversationID, app.cfg.MaxChatMessages)
 	if err != nil {
 		writeEvent("error", "Failed to load conversation history.")
@@ -794,6 +799,8 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 		history = []LLMMessage{{Role: "user", Content: conv.Title}}
 	}
 
+	_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, query)
+	writeEvent("search_query", query)
 	intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, query, history)
 	_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, query, intentEmb)
 	if processErr != nil {
@@ -827,13 +834,14 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 			break
 		}
 
+		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "search_more",
 			"loop", loop+1,
 			"trigger", trigger,
 			"query", newSearchQuery,
 		)
-		writeEvent("status", fmt.Sprintf("Searching for more information: %s", newSearchQuery))
+		writeEvent("search_query", newSearchQuery)
 
 		moreIntentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
 		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, moreIntentEmb)
@@ -1384,6 +1392,10 @@ func (service *ConversationService) AddMessage(ctx context.Context, conversation
 	return service.AddMessageWithReasoning(ctx, conversationID, role, content, "")
 }
 
+func (service *ConversationService) AddSearchQueryMessage(ctx context.Context, conversationID int64, query string) error {
+	return service.AddMessage(ctx, conversationID, "system", "search_query:"+strings.TrimSpace(query))
+}
+
 func (service *ConversationService) AddMessageWithReasoning(ctx context.Context, conversationID int64, role, content, reasoning string) error {
 	if _, err := service.db.ExecContext(ctx, `
         INSERT INTO messages (conversation_id, role, content, reasoning) VALUES (?, ?, ?, ?)
@@ -1750,6 +1762,14 @@ func (service *ConversationService) GetConversationView(ctx context.Context, use
 	if err != nil {
 		return ConversationView{}, err
 	}
+	// Mark the very first user message (initial search query) so the template
+	// can skip it — it's already shown as the conversation title.
+	for i := range messages {
+		if messages[i].Role == "user" {
+			messages[i].SkipInDisplay = true
+			break
+		}
+	}
 	conversation.Messages = messages
 
 	results, err := service.GetSearchResults(ctx, conversationID)
@@ -1838,7 +1858,9 @@ func (service *ConversationService) GetSearchResults(ctx context.Context, conver
 		FROM search_results r
 		LEFT JOIN summaries s ON s.conversation_id = r.conversation_id AND s.url = r.url
 		WHERE r.conversation_id = ?
-		ORDER BY CASE WHEN COALESCE(s.rerank_position, 0) > 0 THEN 0 ELSE 1 END ASC,
+		ORDER BY CASE WHEN COALESCE(s.status, '') IN ('error', 'skipped') THEN 2
+		              WHEN COALESCE(s.rerank_position, 0) > 0 THEN 0
+		              ELSE 1 END ASC,
 		         COALESCE(s.rerank_position, 0) ASC,
 		         r.rank ASC
     `, conversationID)
@@ -1860,15 +1882,19 @@ func (service *ConversationService) GetSearchResults(ctx context.Context, conver
 
 func (service *ConversationService) GetSearchEngineStatus(ctx context.Context, conversationID int64) ([]SearchEngineStatus, error) {
 	rows, err := service.db.QueryContext(ctx, `
-        SELECT engine, status, detail, result_count
+        SELECT engine,
+               CASE WHEN SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) > 0 THEN 'error'
+                    WHEN SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) > 0 THEN 'timeout'
+                    ELSE 'ok' END AS status,
+               '' AS detail,
+               SUM(result_count) AS result_count
         FROM search_engine_statuses
         WHERE conversation_id = ?
+        GROUP BY engine
         ORDER BY
-            CASE status
-                WHEN 'error' THEN 0
-                WHEN 'timeout' THEN 1
-                ELSE 2
-            END,
+            CASE WHEN SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) > 0 THEN 0
+                 WHEN SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) > 0 THEN 1
+                 ELSE 2 END,
             engine ASC
     `, conversationID)
 	if err != nil {
@@ -2057,7 +2083,7 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 	}
 
 	if maxChars <= 0 {
-		maxChars = 4200
+		maxChars = 12000
 	}
 	if maxDocs <= 0 {
 		maxDocs = 5
@@ -2074,12 +2100,12 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 		}
 		docIndex++
 
-		excerpt := compactContextText(summary.SourceText, 1400)
+		excerpt := compactContextText(summary.SourceText, 2500)
 		block := fmt.Sprintf("[%d] URL: %s\nSimilarity: %.4f\n", summary.RerankPosition, summary.URL, summary.SimilarityScore)
 		if excerpt != "" {
 			block += fmt.Sprintf("Extracted text excerpt:\n%s\n\n", excerpt)
 		}
-		block += fmt.Sprintf("Summary:\n%s\n", compactContextText(summary.Summary, 900))
+		block += fmt.Sprintf("Summary:\n%s\n", compactContextText(summary.Summary, 1200))
 		block += "\n"
 		if builder.Len()+len(block) > maxChars {
 			remaining := maxChars - builder.Len()

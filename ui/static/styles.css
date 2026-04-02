@@ -541,6 +541,7 @@ textarea {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.72rem;
   color: var(--muted);
+  min-width: 0;
 }
 
 .engine-status-inline {
@@ -575,6 +576,7 @@ textarea {
   justify-content: space-between;
   align-items: end;
   gap: 16px;
+  min-width: 0;
 }
 
 .section-header-actions {
@@ -1170,6 +1172,76 @@ textarea {
   height: 100%;
 }
 
+/* ===== Two-column conversation split layout ===== */
+
+.conversation-body {
+  display: contents;
+}
+
+.conversation-body--split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.conversation-body--split .results-grid {
+  grid-template-columns: 1fr;
+}
+
+.conversation-body--split .result-card-snippet {
+  display: none;
+}
+
+/* ===== Results show-more button ===== */
+
+.results-show-more {
+  width: 100%;
+  margin-top: 4px;
+  justify-content: center;
+}
+
+/* ===== Additional research pill ===== */
+
+.search-query-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(12, 124, 89, 0.2);
+  background: rgba(12, 124, 89, 0.06);
+  font-size: 0.82rem;
+  color: var(--accent-strong);
+  margin: 6px 0;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.search-query-pill-icon {
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.search-query-pill-label {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.search-query-pill-text {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Iterative (inline search) result card accent */
+.result-card--iterative {
+  border-left: 3px solid rgba(12, 124, 89, 0.4);
+}
+
 @media (max-width: 960px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1195,6 +1267,14 @@ textarea {
 
   body.sidebar-collapsed .app-shell {
     grid-template-columns: 1fr;
+  }
+
+  .conversation-body--split {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-body--split .result-card-snippet {
+    display: block;
   }
 }
 

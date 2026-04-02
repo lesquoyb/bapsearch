@@ -696,6 +696,7 @@ func longestTrimmableMessage(messages []LLMMessage) int {
 	longestIndex := -1
 	longestLength := 0
 	for index, message := range messages {
+		// Prefer trimming non-system messages first; include system only as last resort.
 		if index == 0 && message.Role == "system" {
 			continue
 		}
@@ -704,6 +705,14 @@ func longestTrimmableMessage(messages []LLMMessage) int {
 		if length > longestLength && length > minTrimmableMessageLen {
 			longestIndex = index
 			longestLength = length
+		}
+	}
+
+	// If no non-system message is long enough, fall back to trimming the system message.
+	if longestIndex == -1 && len(messages) > 0 && messages[0].Role == "system" {
+		length := len([]rune(strings.TrimSpace(messages[0].Content)))
+		if length > minTrimmableMessageLen {
+			longestIndex = 0
 		}
 	}
 

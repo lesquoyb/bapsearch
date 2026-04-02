@@ -45,6 +45,7 @@ type Config struct {
 	ContextDocCount      int
 	ChatContextChars     int
 	MaxChatMessages      int
+	ResultsDisplayLimit  int
 	LLMMaxResponseTokens int
 	LLMContextTokens     int
 	AllowAnonymous       bool
@@ -195,11 +196,14 @@ func main() {
 			case "timeout":
 				return status.Engine + " timeout"
 			default:
-				if status.Detail != "" {
-					return status.Engine + " error"
-				}
 				return status.Engine + " error"
 			}
+		},
+		"isSearchQueryMsg": func(msg MessageRecord) bool {
+			return msg.Role == "system" && strings.HasPrefix(msg.Content, "search_query:")
+		},
+		"searchQueryText": func(msg MessageRecord) string {
+			return strings.TrimPrefix(msg.Content, "search_query:")
 		},
 		"summaryStatusLabel": func(status string) string {
 			switch strings.TrimSpace(status) {
@@ -240,21 +244,21 @@ func main() {
 	}
 
 	conversations := &ConversationService{db: db, logger: logger, summaryTarget: cfg.SummarizeURLLimit}
-	       llm := &LLMService{
-		       baseURL:           cfg.LlamaURL,
-		       rewriteURL:        cfg.RewriteLLMURL,
-		       embeddingsURL:     cfg.EmbeddingsURL,
-		       client:            &http.Client{Timeout: 10 * time.Minute},
-		       logger:            logger,
-		       maxResponseTokens: cfg.LLMMaxResponseTokens,
-		       contextTokens:     cfg.LLMContextTokens,
-		       maxEmbeddingChars: cfg.MaxEmbeddingChars,
-		       enableThinking:    true,
-		       reasoningBudget:   2048,
-		       temperature:       0.2,
-		       topP:              1.0,
-		       topK:              40,
-	       }
+	llm := &LLMService{
+		baseURL:           cfg.LlamaURL,
+		rewriteURL:        cfg.RewriteLLMURL,
+		embeddingsURL:     cfg.EmbeddingsURL,
+		client:            &http.Client{Timeout: 10 * time.Minute},
+		logger:            logger,
+		maxResponseTokens: cfg.LLMMaxResponseTokens,
+		contextTokens:     cfg.LLMContextTokens,
+		maxEmbeddingChars: cfg.MaxEmbeddingChars,
+		enableThinking:    true,
+		reasoningBudget:   2048,
+		temperature:       0.2,
+		topP:              1.0,
+		topK:              40,
+	}
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	summarizeService := &SummarizeService{
@@ -368,6 +372,30 @@ func (app *App) loadSettingsFromDB() {
 			app.cfg.MaxChatMessages = n
 		}
 	}
+	if v := app.conversations.GetSetting(ctx, "results_display_limit", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.ResultsDisplayLimit = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "summarize_url_limit", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.SummarizeURLLimit = n
+			app.summarize.urlLimit = n
+			app.conversations.summaryTarget = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "max_extract_chars", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.MaxExtractChars = n
+			app.fetch.maxExtractChars = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "fetch_workers", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.FetchWorkers = n
+			app.fetch.workerCount = n
+		}
+	}
 }
 
 func friendlySiteName(host string) string {
@@ -439,9 +467,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/healthz", app.handleHealth)
 	mux.HandleFunc("/search", app.handleSearch)
 	mux.HandleFunc("/conversations/", app.handleConversationRoutes)
-	// Route for the unified settings page.
 	mux.HandleFunc("/settings", app.handleSettingsPage)
-	mux.HandleFunc("/settings/save", app.handleSettingsSave)
 	mux.HandleFunc("/settings/download", app.handleModelDownload)
 	mux.HandleFunc("/settings/download-status", app.handleModelDownloadStatus)
 	mux.HandleFunc("/memory", app.handleMemoryPage)
@@ -594,13 +620,14 @@ func loadConfig() Config {
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 12000),
-		MaxEmbeddingChars:    envOrDefaultInt("BAP_MAX_EMBEDDING_CHARS", 1800),
+		MaxEmbeddingChars:    envOrDefaultInt("BAP_MAX_EMBEDDING_CHARS", 1600),
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
 		ContextDocCount:      envOrDefaultInt("BAP_CONTEXT_DOC_COUNT", 5),
-		ChatContextChars:     envOrDefaultInt("BAP_CHAT_CONTEXT_CHARS", 4200),
+		ChatContextChars:     envOrDefaultInt("BAP_CHAT_CONTEXT_CHARS", 12000),
 		MaxChatMessages:      envOrDefaultInt("BAP_MAX_CHAT_MESSAGES", 8),
+		ResultsDisplayLimit:  envOrDefaultInt("BAP_RESULTS_DISPLAY_LIMIT", 10),
 		LLMMaxResponseTokens: envOrDefaultInt("BAP_LLM_MAX_TOKENS", 700),
 		LLMContextTokens:     envOrDefaultInt("BAP_LLM_CONTEXT_TOKENS", 8192),
 		AllowAnonymous:       envOrDefault("BAP_ALLOW_ANONYMOUS", "true") == "true",
@@ -617,60 +644,7 @@ func applySchema(db *sql.DB, schemaPath string) error {
 		return err
 	}
 
-	migrations := []struct {
-		table      string
-		column     string
-		definition string
-	}{
-		{table: "conversations", column: "rewritten_query", definition: "TEXT NOT NULL DEFAULT ''"},
-		{table: "conversations", column: "rewrite_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
-		{table: "conversations", column: "rewrite_detail", definition: "TEXT NOT NULL DEFAULT ''"},
-		{table: "conversations", column: "answer_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
-		{table: "conversations", column: "answer_detail", definition: "TEXT NOT NULL DEFAULT ''"},
-		{table: "search_results", column: "query_variant", definition: "TEXT NOT NULL DEFAULT 'original'"},
-		{table: "summaries", column: "embedding_json", definition: "TEXT NOT NULL DEFAULT ''"},
-		{table: "summaries", column: "similarity_score", definition: "REAL NOT NULL DEFAULT 0"},
-		{table: "summaries", column: "rerank_position", definition: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "messages", column: "reasoning", definition: "TEXT NOT NULL DEFAULT ''"},
-		{table: "users", column: "password_hash", definition: "TEXT NOT NULL DEFAULT ''"},
-	}
-
-	for _, migration := range migrations {
-		if err := ensureColumn(db, migration.table, migration.column, migration.definition); err != nil {
-			return err
-		}
-	}
-
 	return nil
-}
-
-func ensureColumn(db *sql.DB, table, column, definition string) error {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var dataType string
-		var notNull int
-		var defaultValue sql.NullString
-		var primaryKey int
-		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return err
-		}
-		if strings.EqualFold(name, column) {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
-	return err
 }
 
 func envOrDefault(key, fallback string) string {

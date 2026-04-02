@@ -162,15 +162,7 @@ The backend writes structured JSON logs to `/logs/backend.jsonl` and stdout. Log
 
 ## API surface
 
-- `GET /` search landing page
-- `POST /search` search workflow entrypoint
-- `GET /conversations/{id}` conversation page
-- `GET /conversations/{id}/summaries` async summaries block
-- `POST /conversations/{id}/messages` follow-up chat
-- `GET /settings` settings page
-- `POST /settings` save settings and active models
-- `POST /settings/download` direct GGUF download
-- `GET /healthz` health check
+See [docs/api.md](api.md) for the full route reference.
 
 ## Security notes
 

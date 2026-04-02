@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// handleSettingsPage serves GET /settings and POST /settings (save).
+// handleSettingsPage serves GET /settings. POST is delegated to handleSettingsSave.
 func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		app.handleSettingsSave(w, r)
@@ -43,16 +43,14 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"max_tokens":           app.conversations.GetSetting(ctx, "max_tokens", "1024"),
 		"enable_thinking":      app.conversations.GetSetting(ctx, "enable_thinking", "true"),
 		"reasoning_budget":     app.conversations.GetSetting(ctx, "reasoning_budget", "2048"),
-		"search_engine":        app.conversations.GetSetting(ctx, "search_engine", "searxng"),
-		"search_count":         app.conversations.GetSetting(ctx, "search_count", "8"),
-		"similarity_threshold": app.conversations.GetSetting(ctx, "similarity_threshold", "0.5"),
 		"summarize_url_limit":  app.conversations.GetSetting(ctx, "summarize_url_limit", "3"),
 		"max_extract_chars":    app.conversations.GetSetting(ctx, "max_extract_chars", "12000"),
 		"fetch_workers":        app.conversations.GetSetting(ctx, "fetch_workers", "3"),
 		"chat_context_chars":   app.conversations.GetSetting(ctx, "chat_context_chars", "4200"),
 		"max_chat_messages":    app.conversations.GetSetting(ctx, "max_chat_messages", "8"),
-		"max_search_loops":     app.conversations.GetSetting(ctx, "max_search_loops", "3"),
-		"context_doc_count":    app.conversations.GetSetting(ctx, "context_doc_count", "5"),
+		"max_search_loops":       app.conversations.GetSetting(ctx, "max_search_loops", "3"),
+		"context_doc_count":      app.conversations.GetSetting(ctx, "context_doc_count", "5"),
+		"results_display_limit":  app.conversations.GetSetting(ctx, "results_display_limit", "10"),
 	}
 
 	app.render(w, "settings", PageData{
@@ -74,7 +72,7 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSettingsSave processes POST /settings.
+// handleSettingsSave processes the settings form submission.
 func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -93,11 +91,9 @@ func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	dbKeys := []string{
 		"temperature", "top_p", "top_k", "max_tokens",
 		"enable_thinking", "reasoning_budget",
-		"search_engine", "search_count",
-		"similarity_threshold",
 		"summarize_url_limit", "max_extract_chars", "fetch_workers",
 		"chat_context_chars", "max_chat_messages", "max_search_loops",
-		"context_doc_count",
+		"context_doc_count", "results_display_limit",
 		"prompt_summarize", "prompt_synthesize", "prompt_chat", "prompt_memory",
 	}
 	for _, key := range dbKeys {

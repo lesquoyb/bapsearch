@@ -154,6 +154,8 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_MAX_EMBEDDING_CHARS` | `1800` | Max chars sent to embedding model |
 | `BAP_CHAT_CONTEXT_CHARS` | `4200` | Conversation context for follow-ups |
 | `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
+| `BAP_SUMMARY_WORKERS` | `1` | Concurrent summary pipeline workers |
+| `BAP_CONTEXT_DOC_COUNT` | `5` | Top-ranked sources included in answer context |
 | `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |
 | `BAP_LLM_CONTEXT_TOKENS` | `8192` | LLM context window size |
 | `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
@@ -189,7 +191,7 @@ All of these are adjustable from the `/settings` page without restart:
 | `POST` | `/conversations/{id}/summaries/regenerate` | Rebuild summaries from stored results |
 | `POST` | `/conversations/{id}/delete` | Delete conversation |
 | `GET` | `/settings` | Settings page |
-| `POST` | `/settings/save` | Save settings |
+| `POST` | `/settings` | Save settings |
 | `POST` | `/settings/download` | Download a GGUF model from URL |
 | `GET` | `/memory` | View/edit persistent user memory |
 | `POST` | `/memory` | Save user memory |
