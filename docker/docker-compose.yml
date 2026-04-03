@@ -179,7 +179,11 @@ services:
       - internal
 
   llama-answer:
-    image: ${LLAMA_ANSWER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    build:
+      context: .
+      dockerfile: llama.Dockerfile
+      args:
+        LLAMA_IMAGE: ${LLAMA_ANSWER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
     environment:
       MODEL_DIR: /models
@@ -198,12 +202,15 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ${BAP_MODELS_PATH:-../models}:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
   llama-rewrite:
-    image: ${LLAMA_REWRITE_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    build:
+      context: .
+      dockerfile: llama.Dockerfile
+      args:
+        LLAMA_IMAGE: ${LLAMA_REWRITE_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
     environment:
       MODEL_DIR: /models
@@ -222,12 +229,15 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ${BAP_MODELS_PATH:-../models}:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
   llama-embeddings:
-    image: ${LLAMA_EMBEDDINGS_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    build:
+      context: .
+      dockerfile: llama.Dockerfile
+      args:
+        LLAMA_IMAGE: ${LLAMA_EMBEDDINGS_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
     environment:
       MODEL_DIR: /models
@@ -246,12 +256,13 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ${BAP_MODELS_PATH:-../models}:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
   searxng:
-    image: searxng/searxng:latest
+    build:
+      context: .
+      dockerfile: searxng.Dockerfile
     restart: unless-stopped
     environment:
       BASE_URL: http://searxng:8080/
@@ -259,8 +270,6 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
-    volumes:
-      - ./searxng-settings.yml:/etc/searxng/settings.yml
     networks:
       - public
       - internal
