@@ -1308,6 +1308,37 @@ textarea {
   height: 100%;
 }
 
+/* ===== Conversation page full-height layout ===== */
+
+.content--conversation {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 28px;
+}
+
+.content--conversation > .conversation-hero-bar {
+  flex: 0 0 auto;
+}
+
+/* Non-split: body scrolls normally, override display:contents */
+.content--conversation > .conversation-body {
+  display: block;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Split: body is a grid that fills remaining height */
+.content--conversation > .conversation-body--split {
+  display: grid;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* ===== Two-column conversation split layout ===== */
 
 .conversation-body {
@@ -1317,17 +1348,16 @@ textarea {
 .conversation-body--split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  grid-template-rows: 1fr;
   column-gap: 20px;
-  align-items: start;
+  align-items: stretch;
+  height: 100%;
 }
 
-/* Each column: sticky pane with fixed height and internal scroll */
+/* Each column: fills full height of parent, internal scroll */
 .conversation-body--split > .section-block {
-  position: sticky;
-  top: 28px;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 56px);
   min-height: 400px;
   overflow: hidden;
   gap: 0;
@@ -1458,8 +1488,23 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .content--conversation {
+    height: auto;
+    overflow: visible;
+    display: grid;
+  }
+
+  .content--conversation > .conversation-body,
+  .content--conversation > .conversation-body--split {
+    flex: none;
+    overflow-y: visible;
+    min-height: 0;
+  }
+
   .conversation-body--split {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    height: auto;
   }
 
   .conversation-body--split > .section-block {
