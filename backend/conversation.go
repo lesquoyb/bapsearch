@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,7 +40,6 @@ type MessageRecord struct {
 
 type SummaryRecord struct {
 	URL             string
-	Summary         string
 	SourceText      string
 	Status          string
 	Detail          string
@@ -81,6 +81,12 @@ func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Support ?q=... to start a search directly from the URL.
+	if query := strings.TrimSpace(r.URL.Query().Get("q")); query != "" {
+		app.startSearch(w, r, query)
+		return
+	}
+
 	meta := requestMetaFromContext(r.Context())
 	if err := app.conversations.EnsureUser(r.Context(), meta.UserID); err != nil {
 		http.Error(w, "failed to initialize user", http.StatusInternalServerError)
@@ -113,6 +119,10 @@ func (app *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	app.startSearch(w, r, query)
+}
+
+func (app *App) startSearch(w http.ResponseWriter, r *http.Request, query string) {
 	meta := requestMetaFromContext(r.Context())
 	if err := app.conversations.EnsureUser(r.Context(), meta.UserID); err != nil {
 		http.Error(w, "failed to initialize user", http.StatusInternalServerError)
@@ -355,11 +365,35 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	var writeMu sync.Mutex
+
 	writeEvent := func(event, data string) {
 		encoded, _ := json.Marshal(data)
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		fl.Flush()
 	}
+
+	// Keepalive goroutine: prevents the browser from dropping the SSE connection
+	// during the silent period between reasoning tokens and the final reply.
+	keepaliveStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-keepaliveStop:
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				fmt.Fprintf(w, ": keepalive\n\n")
+				fl.Flush()
+				writeMu.Unlock()
+			}
+		}
+	}()
+	defer close(keepaliveStop)
 
 	writeEvent("status", "Waiting for the ranked sources.")
 
@@ -453,8 +487,10 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		cleaned := stripNeedMoreSearch(reply)
 		if cleaned != "" {
 			encoded, _ := json.Marshal(cleaned)
+			writeMu.Lock()
 			fmt.Fprintf(w, "data: %s\n\n", encoded)
 			fl.Flush()
+			writeMu.Unlock()
 			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
 			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated (search limit reached).")
 		}
@@ -464,8 +500,10 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 	encoded, _ := json.Marshal(reply)
+	writeMu.Lock()
 	fmt.Fprintf(w, "data: %s\n\n", encoded)
 	fl.Flush()
+	writeMu.Unlock()
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("storing assistant answer failed", "error", err)
@@ -1165,8 +1203,7 @@ func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, co
 			continue
 		}
 
-		preview := buildExtractionPreview(text)
-		_ = app.conversations.StoreDocument(ctx, conversationID, doc.URL, preview, text, string(embeddingJSON))
+		_ = app.conversations.StoreDocument(ctx, conversationID, doc.URL, text, string(embeddingJSON))
 	}
 
 	// Determine which embedding to use for ranking
@@ -1532,8 +1569,8 @@ func (service *ConversationService) StoreSearchResults(ctx context.Context, conv
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-			VALUES (?, ?, '', '', '', 0, 0, 'pending', '')
+			INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+			VALUES (?, ?, '', '', 0, 0, 'pending', '')
 		`, conversationID, result.URL); err != nil {
 			return err
 		}
@@ -1603,8 +1640,8 @@ func (service *ConversationService) AppendSearchResults(ctx context.Context, con
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-			VALUES (?, ?, '', '', '', 0, 0, 'pending', '')
+			INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+			VALUES (?, ?, '', '', 0, 0, 'pending', '')
 			ON CONFLICT(conversation_id, url) DO NOTHING
 		`, conversationID, result.URL); err != nil {
 			return nil, err
@@ -1667,37 +1704,17 @@ func (service *ConversationService) UpdateAnswerStatus(ctx context.Context, conv
 	return err
 }
 
-func (service *ConversationService) StoreSummary(ctx context.Context, conversationID int64, url, summary, sourceText string) error {
+func (service *ConversationService) StoreDocument(ctx context.Context, conversationID int64, url, sourceText, embeddingJSON string) error {
 	_, err := service.db.ExecContext(ctx, `
-		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-		VALUES (?, ?, ?, ?, '', 0, 0, 'ready', '')
-        ON CONFLICT(conversation_id, url) DO UPDATE SET
-            summary = excluded.summary,
-            source_text = excluded.source_text,
-            status = 'ready',
-            status_detail = '',
-            updated_at = CURRENT_TIMESTAMP
-    `, conversationID, url, summary, sourceText)
-	if err != nil {
-		return err
-	}
-
-	_, err = service.db.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
-	return err
-}
-
-func (service *ConversationService) StoreDocument(ctx context.Context, conversationID int64, url, summary, sourceText, embeddingJSON string) error {
-	_, err := service.db.ExecContext(ctx, `
-		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-		VALUES (?, ?, ?, ?, ?, 0, 0, 'ready', '')
+		INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, ?, ?, 0, 0, 'ready', '')
 		ON CONFLICT(conversation_id, url) DO UPDATE SET
-			summary = excluded.summary,
 			source_text = excluded.source_text,
 			embedding_json = excluded.embedding_json,
 			status = 'ready',
 			status_detail = '',
 			updated_at = CURRENT_TIMESTAMP
-	`, conversationID, url, summary, sourceText, embeddingJSON)
+	`, conversationID, url, sourceText, embeddingJSON)
 	if err != nil {
 		return err
 	}
@@ -1707,8 +1724,8 @@ func (service *ConversationService) StoreDocument(ctx context.Context, conversat
 
 func (service *ConversationService) UpdateSummaryStatus(ctx context.Context, conversationID int64, url, status, detail string) error {
 	_, err := service.db.ExecContext(ctx, `
-		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-		VALUES (?, ?, '', '', '', 0, 0, ?, ?)
+		INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, '', '', 0, 0, ?, ?)
         ON CONFLICT(conversation_id, url) DO UPDATE SET
             status = excluded.status,
             status_detail = excluded.status_detail,
@@ -1724,8 +1741,8 @@ func (service *ConversationService) UpdateSummaryStatus(ctx context.Context, con
 
 func (service *ConversationService) UpdateSummarySource(ctx context.Context, conversationID int64, url, sourceText string) error {
 	_, err := service.db.ExecContext(ctx, `
-		INSERT INTO summaries (conversation_id, url, summary, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
-		VALUES (?, ?, '', ?, '', 0, 0, 'pending', '')
+		INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, ?, '', 0, 0, 'pending', '')
         ON CONFLICT(conversation_id, url) DO UPDATE SET
             source_text = excluded.source_text,
             updated_at = CURRENT_TIMESTAMP
@@ -1816,7 +1833,7 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE summaries
-		SET summary = '', source_text = '', embedding_json = '', similarity_score = 0, rerank_position = 0, status = 'pending', status_detail = '', updated_at = CURRENT_TIMESTAMP
+		SET source_text = '', embedding_json = '', similarity_score = 0, rerank_position = 0, status = 'pending', status_detail = '', updated_at = CURRENT_TIMESTAMP
 		WHERE conversation_id = ?
 	`, conversationID); err != nil {
 		return err
@@ -1882,7 +1899,7 @@ func (service *ConversationService) GetSearchResults(ctx context.Context, conver
 
 func (service *ConversationService) GetSearchEngineStatus(ctx context.Context, conversationID int64) ([]SearchEngineStatus, error) {
 	rows, err := service.db.QueryContext(ctx, `
-        SELECT engine,
+        SELECT TRIM(REPLACE(REPLACE(engine, ' (original)', ''), ' (rewritten)', '')) AS engine_name,
                CASE WHEN SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) > 0 THEN 'error'
                     WHEN SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) > 0 THEN 'timeout'
                     ELSE 'ok' END AS status,
@@ -1890,12 +1907,12 @@ func (service *ConversationService) GetSearchEngineStatus(ctx context.Context, c
                SUM(result_count) AS result_count
         FROM search_engine_statuses
         WHERE conversation_id = ?
-        GROUP BY engine
+        GROUP BY engine_name
         ORDER BY
             CASE WHEN SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) > 0 THEN 0
                  WHEN SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) > 0 THEN 1
                  ELSE 2 END,
-            engine ASC
+            engine_name ASC
     `, conversationID)
 	if err != nil {
 		return nil, err
@@ -1915,7 +1932,7 @@ func (service *ConversationService) GetSearchEngineStatus(ctx context.Context, c
 
 func (service *ConversationService) GetSummaries(ctx context.Context, conversationID int64) ([]SummaryRecord, error) {
 	rows, err := service.db.QueryContext(ctx, `
-	SELECT url, summary, source_text, status, status_detail, similarity_score, rerank_position
+	SELECT url, source_text, status, status_detail, similarity_score, rerank_position
         FROM summaries
         WHERE conversation_id = ?
 	ORDER BY CASE WHEN rerank_position > 0 THEN 0 ELSE 1 END, rerank_position ASC, created_at ASC, id ASC
@@ -1928,7 +1945,7 @@ func (service *ConversationService) GetSummaries(ctx context.Context, conversati
 	summaries := []SummaryRecord{}
 	for rows.Next() {
 		var item SummaryRecord
-		if err := rows.Scan(&item.URL, &item.Summary, &item.SourceText, &item.Status, &item.Detail, &item.SimilarityScore, &item.RerankPosition); err != nil {
+		if err := rows.Scan(&item.URL, &item.SourceText, &item.Status, &item.Detail, &item.SimilarityScore, &item.RerankPosition); err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, item)
@@ -1938,7 +1955,7 @@ func (service *ConversationService) GetSummaries(ctx context.Context, conversati
 
 func (service *ConversationService) ListRankedSources(ctx context.Context, conversationID int64) ([]RankedSource, error) {
 	rows, err := service.db.QueryContext(ctx, `
-		SELECT s.url, r.title, r.snippet, r.query_variant, s.summary, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
+		SELECT s.url, r.title, r.snippet, r.query_variant, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
 		FROM summaries s
 		JOIN search_results r ON r.conversation_id = s.conversation_id AND r.url = s.url
 		WHERE s.conversation_id = ?
@@ -1951,7 +1968,7 @@ func (service *ConversationService) ListRankedSources(ctx context.Context, conve
 	sources := []RankedSource{}
 	for rows.Next() {
 		var item RankedSource
-		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Summary, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
 			return nil, err
 		}
 		sources = append(sources, item)
@@ -1965,7 +1982,7 @@ func (service *ConversationService) ListTopRankedSources(ctx context.Context, co
 	}
 
 	rows, err := service.db.QueryContext(ctx, `
-		SELECT s.url, r.title, r.snippet, r.query_variant, s.summary, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
+		SELECT s.url, r.title, r.snippet, r.query_variant, s.source_text, s.embedding_json, s.similarity_score, s.rerank_position
 		FROM summaries s
 		JOIN search_results r ON r.conversation_id = s.conversation_id AND r.url = s.url
 		WHERE s.conversation_id = ? AND s.rerank_position > 0 AND s.status = 'ready' AND s.source_text != ''
@@ -1980,7 +1997,7 @@ func (service *ConversationService) ListTopRankedSources(ctx context.Context, co
 	sources := []RankedSource{}
 	for rows.Next() {
 		var item RankedSource
-		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Summary, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.SourceText, &item.EmbeddingJSON, &item.SimilarityScore, &item.RerankPosition); err != nil {
 			return nil, err
 		}
 		sources = append(sources, item)
@@ -2103,9 +2120,8 @@ func (service *ConversationService) BuildSearchContext(ctx context.Context, user
 		excerpt := compactContextText(summary.SourceText, 2500)
 		block := fmt.Sprintf("[%d] URL: %s\nSimilarity: %.4f\n", summary.RerankPosition, summary.URL, summary.SimilarityScore)
 		if excerpt != "" {
-			block += fmt.Sprintf("Extracted text excerpt:\n%s\n\n", excerpt)
+			block += fmt.Sprintf("Extracted text excerpt:\n%s\n", excerpt)
 		}
-		block += fmt.Sprintf("Summary:\n%s\n", compactContextText(summary.Summary, 1200))
 		block += "\n"
 		if builder.Len()+len(block) > maxChars {
 			remaining := maxChars - builder.Len()

@@ -124,8 +124,8 @@
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
 
-          <label for="summarize_url_limit">URLs to summarize</label>
-          <p class="muted">Maximum number of top-ranked URLs whose content will be fetched and summarized per search. Higher values give richer context but take longer.</p>
+          <label for="summarize_url_limit">URLs to fetch per search</label>
+          <p class="muted">Maximum number of top-ranked URLs whose content will be fetched and indexed per search. Higher values give richer context but take longer.</p>
           <div class="setting-row">
             <input type="number" step="1" min="1" max="20" id="summarize_url_limit" name="summarize_url_limit" value="{{ index .Settings "summarize_url_limit" }}" data-default="3">
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
@@ -190,16 +190,6 @@
           <div class="eyebrow">Prompt engineering</div>
           <h2>System prompts</h2>
         </div></div>
-        <article class="card">
-          <div class="eyebrow">Article summarization</div>
-          <p class="muted">Used to summarize each search result page.</p>
-          <textarea name="prompt_summarize" rows="6">{{ index .Prompts "prompt_summarize" }}</textarea>
-        </article>
-        <article class="card">
-          <div class="eyebrow">Global synthesis</div>
-          <p class="muted">Used to generate the final answer from all summaries.</p>
-          <textarea name="prompt_synthesize" rows="8">{{ index .Prompts "prompt_synthesize" }}</textarea>
-        </article>
         <article class="card">
           <div class="eyebrow">Chat replies</div>
           <p class="muted">Used to answer follow-up questions in the conversation.</p>

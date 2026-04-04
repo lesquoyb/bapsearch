@@ -19,13 +19,7 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	models, _ := app.listModels()
 
 	// Prompts
-	s, sy, c, m := app.llm.Prompts.GetAll()
-	if strings.TrimSpace(s) == "" {
-		s = DefaultPromptSummarize
-	}
-	if strings.TrimSpace(sy) == "" {
-		sy = DefaultPromptSynthesize
-	}
+	c, m := app.llm.Prompts.GetAll()
 	if strings.TrimSpace(c) == "" {
 		c = DefaultPromptChat
 	}
@@ -64,10 +58,8 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		Status:         r.URL.Query().Get("status"),
 		Settings:       settings,
 		Prompts: map[string]string{
-			"prompt_summarize":  s,
-			"prompt_synthesize": sy,
-			"prompt_chat":       c,
-			"prompt_memory":     m,
+			"prompt_chat":   c,
+			"prompt_memory": m,
 		},
 	})
 }
@@ -94,7 +86,7 @@ func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"summarize_url_limit", "max_extract_chars", "fetch_workers",
 		"chat_context_chars", "max_chat_messages", "max_search_loops",
 		"context_doc_count", "results_display_limit",
-		"prompt_summarize", "prompt_synthesize", "prompt_chat", "prompt_memory",
+		"prompt_chat", "prompt_memory",
 	}
 	for _, key := range dbKeys {
 		val := strings.TrimSpace(r.FormValue(key))

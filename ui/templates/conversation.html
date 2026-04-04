@@ -5,26 +5,22 @@
   <main class="content">
     {{ template "status_banner" . }}
 
-    <section class="hero card hero-compact hero-full">
-      <div class="conversation-hero-head">
-        <div>
-          <h1>{{ .Conversation.Title }}</h1>
-        </div>
-        <div class="conversation-hero-actions">
-          <form action="/conversations/{{ .Conversation.ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');">
-            <button class="ghost-button danger-button icon-button" type="submit" title="Delete this conversation and all related data" aria-label="Delete conversation">🗑️</button>
-          </form>
-        </div>
+    <section class="card conversation-hero-bar">
+      <div class="conversation-hero-title">
+        <h1>{{ .Conversation.Title }}</h1>
       </div>
-      <form class="search-form search-form-inline" action="/search" method="post" data-submit-loading>
-        <label for="q">Start another search</label>
+      <form class="conversation-hero-search" action="/search" method="post" data-submit-loading>
+        <label for="q" class="sr-only">Start another search</label>
         <div class="search-row">
           <input id="q" name="q" type="search" value="{{ .Conversation.Title }}" required>
-          <button type="submit" data-loading-label="Searching...">Search</button>
+          <button type="submit" data-loading-label="…">Search</button>
+          <form action="/conversations/{{ .Conversation.ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');">
+            <button class="ghost-button danger-button icon-button" type="submit" title="Delete this conversation" aria-label="Delete conversation">🗑️</button>
+          </form>
         </div>
         <div class="submit-indicator" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
-          <span>Running the search and opening a new thread...</span>
+          <span>Opening a new thread...</span>
         </div>
       </form>
     </section>
@@ -35,9 +31,21 @@
         <div class="section-header section-header-inline">
           {{ if .Conversation.EngineStatus }}
           <div class="engine-status-line engine-status-inline" aria-label="Search engine status">
-            {{ range .Conversation.EngineStatus }}
-            <span class="engine-status-chip engine-status-{{ .Status }}" {{ if .Detail }}title="{{ .Detail }}"{{ end }}>{{ engineStatusLabel . }}</span>
-            {{ end }}
+            <div class="engine-chips-scroller">
+              {{ range .Conversation.EngineStatus }}
+              <span class="engine-status-chip engine-status-{{ .Status }}" {{ if .Detail }}title="{{ .Detail }}"{{ end }}>{{ engineStatusLabel . }}</span>
+              {{ end }}
+            </div>
+            <div class="engine-overflow-hover source-hover" hidden>
+              <div class="source-hover-head">
+                <span class="engine-status-chip engine-overflow-chip" tabindex="0">···</span>
+              </div>
+              <div class="source-summary-popover engine-overflow-popover">
+                {{ range .Conversation.EngineStatus }}
+                <p class="engine-overflow-item engine-status-{{ .Status }}">{{ engineStatusLabel . }}</p>
+                {{ end }}
+              </div>
+            </div>
           </div>
           {{ end }}
         </div>
@@ -47,7 +55,6 @@
           hx-get="/conversations/{{ .Conversation.ID }}/results"
           hx-trigger="load, every 5s"
           hx-swap="innerHTML"
-          hx-indicator="#summary-loading"
           hx-on:htmx:after-swap="bapApplyResultsLimit(this)">
           {{ template "search_results" .Conversation }}
         </div>
@@ -59,6 +66,21 @@
             <h2>Grounded answer</h2>
           </div>
           <div class="section-header-actions">
+            <div id="processing-capsule"{{ if .Conversation.OverviewSummary }} style="display:none"{{ end }}>
+              <div class="source-hover processing-hover processing-hover--header">
+                <div class="source-hover-head">
+                  <span class="spinner spinner-sm" aria-hidden="true"></span>
+                  <span class="processing-capsule-label">Processing sources…</span>
+                </div>
+                <div class="source-summary-popover processing-popover">
+                  <p class="processing-popover-row"><span class="processing-popover-key">Phase</span><span id="proc-status">{{ if .Conversation.AnswerStatus }}{{ .Conversation.AnswerStatus }}{{ else }}pending{{ end }}</span></p>
+                  <p class="processing-popover-row"><span class="processing-popover-key">Sources</span><span id="proc-sources">{{ .Conversation.ReadySummaryCount }}/{{ .Conversation.SummaryTarget }}</span></p>
+                  <p class="processing-popover-row"><span class="processing-popover-key">Rewrite</span><span id="proc-rewrite">{{ rewriteStatusLabel .Conversation.RewriteStatus }}</span></p>
+                  {{ if .Conversation.RewrittenQuery }}<p class="processing-popover-row"><span class="processing-popover-key">Query</span><span id="proc-query">{{ .Conversation.RewrittenQuery }}</span></p>{{ end }}
+                  {{ if .Conversation.AnswerDetail }}<p class="processing-popover-row processing-popover-detail" id="proc-detail">{{ .Conversation.AnswerDetail }}</p>{{ end }}
+                </div>
+              </div>
+            </div>
             <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
               <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
             </form>
@@ -66,16 +88,11 @@
           </div>
         </div>
 
-        <div id="summary-spinner" class="panel-loading-row" aria-live="polite"{{ if .Conversation.OverviewSummary }} style="display:none"{{ end }}>
-          <span class="spinner" aria-hidden="true"></span>
-          <span id="summary-spinner-text">Preparing the ranked sources and the final grounded answer...</span>
-        </div>
-
         <div id="summary-panel"
           hx-get="/conversations/{{ .Conversation.ID }}/summaries"
           hx-trigger="load, every 5s [!document.querySelector('#summary-panel .summary-ready-flag')]"
           hx-swap="innerHTML"
-          hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); document.getElementById('summary-spinner').style.display = done ? 'none' : ''; if (done) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
+          hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); var capsule = document.getElementById('processing-capsule'); if (capsule) capsule.style.display = done ? 'none' : ''; var st = document.querySelector('#summary-panel .summaries-status'); if (st) { var el; el = document.getElementById('proc-status'); if (el) el.textContent = st.dataset.status || ''; el = document.getElementById('proc-sources'); if (el) el.textContent = st.dataset.sources || ''; el = document.getElementById('proc-rewrite'); if (el) el.textContent = st.dataset.rewrite || ''; el = document.getElementById('proc-query'); if (el) { el.textContent = st.dataset.query || ''; el.closest('.processing-popover-row').style.display = st.dataset.query ? '' : 'none'; } el = document.getElementById('proc-detail'); if (el) { el.textContent = st.dataset.detail || ''; el.style.display = st.dataset.detail ? '' : 'none'; } } if (done) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
           {{ template "summaries" .Conversation }}
         </div>
 
@@ -99,11 +116,10 @@
           data-refresh-url="/conversations/{{ .Conversation.ID }}/messages"
           action="/conversations/{{ .Conversation.ID }}/messages"
           method="post">
-          <label for="message">Follow-up question</label>
-          <textarea id="message" name="message" rows="3" placeholder="Compare the sources and explain the trade-offs."></textarea>
-          <div class="chat-actions">
-            <p class="muted">Reply uses the summary, conversation history, and saved memory.</p>
-            <button type="submit" data-loading-label="Waiting...">Send</button>
+          <div class="chat-input-row">
+            <label for="message" class="sr-only">Follow-up question</label>
+            <textarea id="message" name="message" rows="3" placeholder="Follow-up question…"></textarea>
+            <button type="submit" data-loading-label="…">Send</button>
           </div>
         </form>
       </section>

@@ -205,26 +205,6 @@ func main() {
 		"searchQueryText": func(msg MessageRecord) string {
 			return strings.TrimPrefix(msg.Content, "search_query:")
 		},
-		"summaryStatusLabel": func(status string) string {
-			switch strings.TrimSpace(status) {
-			case "fetching":
-				return "Fetching content"
-			case "cleaning":
-				return "Extracting content"
-			case "embedding":
-				return "Embedding content"
-			case "ranking":
-				return "Ranking result"
-			case "skipped":
-				return "Skipped"
-			case "error":
-				return "Error"
-			case "ready":
-				return "Ready"
-			default:
-				return "Unknown status"
-			}
-		},
 		"rewriteStatusLabel": func(status string) string {
 			switch strings.TrimSpace(status) {
 			case "running":
@@ -319,11 +299,9 @@ func main() {
 
 func (app *App) loadPromptsFromDB() {
 	ctx := context.Background()
-	s, sy, c, m := app.conversations.GetSetting(ctx, "prompt_summarize", ""),
-		app.conversations.GetSetting(ctx, "prompt_synthesize", ""),
-		app.conversations.GetSetting(ctx, "prompt_chat", ""),
-		app.conversations.GetSetting(ctx, "prompt_memory", "")
-	app.llm.Prompts.Set(s, sy, c, m)
+	c := app.conversations.GetSetting(ctx, "prompt_chat", "")
+	m := app.conversations.GetSetting(ctx, "prompt_memory", "")
+	app.llm.Prompts.Set(c, m)
 }
 
 func (app *App) loadSettingsFromDB() {

@@ -26,7 +26,6 @@ type RankedSource struct {
 	URL             string
 	Title           string
 	Snippet         string
-	Summary         string
 	SourceText      string
 	SimilarityScore float64
 	RerankPosition  int
@@ -133,12 +132,11 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 				continue
 			}
 
-			statuses := labelEngineStatuses(batch.response.EngineStatus, batch.variant)
 			for index := range batch.response.Results {
 				batch.response.Results[index].QueryVariant = batch.variant
 			}
 
-			inserted, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, batch.response.Results, statuses)
+			inserted, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, batch.response.Results, batch.response.EngineStatus)
 			if err != nil {
 				service.failPipeline(jobContext, logger, job.ConversationID, err)
 				return
@@ -254,8 +252,7 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 			continue
 		}
 
-		preview := buildExtractionPreview(document.Text)
-		if err := service.conversations.StoreDocument(ctx, conversationID, document.URL, preview, document.Text, string(embeddingJSON)); err != nil {
+		if err := service.conversations.StoreDocument(ctx, conversationID, document.URL, document.Text, string(embeddingJSON)); err != nil {
 			logger.Error("storing extracted document failed", "url", document.URL, "error", err)
 			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
 			continue
@@ -282,22 +279,6 @@ func (service *SummarizeService) updateSummaryStatus(ctx context.Context, logger
 	}
 }
 
-func labelEngineStatuses(statuses []SearchEngineStatus, variant string) []SearchEngineStatus {
-	if len(statuses) == 0 {
-		return nil
-	}
-	label := "original"
-	if strings.TrimSpace(variant) != "" {
-		label = strings.TrimSpace(variant)
-	}
-
-	updated := make([]SearchEngineStatus, 0, len(statuses))
-	for _, status := range statuses {
-		status.Engine = fmt.Sprintf("%s (%s)", status.Engine, label)
-		updated = append(updated, status)
-	}
-	return updated
-}
 
 func containsDocument(documents []PageDocument, url string) bool {
 	for _, document := range documents {
@@ -306,14 +287,6 @@ func containsDocument(documents []PageDocument, url string) bool {
 		}
 	}
 	return false
-}
-
-func buildExtractionPreview(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	return compactContextText(text, 900)
 }
 
 func cosineSimilarity(left, right []float64) float64 {

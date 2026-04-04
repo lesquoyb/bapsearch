@@ -43,27 +43,11 @@ const (
 	minTrimmableMessageLen = 256
 )
 
-
 const (
-	DefaultPromptSummarize = `You are bap-search, a search assistant running on a small self-hosted machine.
-Produce a concise factual summary of the extracted page.
-Focus on facts useful for answering the user's query.
-Return plain text with 3 short bullet points and one short concluding sentence.`
-
 	DefaultPromptRewriteSearch = `You rewrite a user query into a stronger web search query.
 Return only one short search string, never an explanation or reasoning.
 Do NOT explain, justify, or output any reasoning, chain-of-thought, or <think> tags.
 Return only the improved search string, nothing else.`
-
-	DefaultPromptSynthesize = `You are bap-search, a conversational search engine.
-You receive article summaries that were already generated from individual search results.
-Answer the user's query as directly as the source summaries allow.
-If the summaries do not fully support a conclusion, say what is missing.
-Return plain text markdown with:
-- a short direct answer or synthesis paragraph
-- 3 to 5 concise bullet points grounded in the summaries
-- one short line starting with "Limits:"`
-
 
 	DefaultPromptGroundedAnswer = `You are bap-search, a grounded web answer engine.
 Answer only from the provided extracted source texts.
@@ -71,7 +55,7 @@ Treat the extracted source texts as the primary evidence, not the short summarie
 Every factual claim must cite at least one source using bracket citations like [1] or [2].
 Return concise markdown with:
 - one short direct answer paragraph
-- 3 to 6 factual bullet points with citations
+- a few factual bullet points with citations
 - one short line starting with "Sources:" listing each cited source number with its site name, like: Sources: [1] Wikipedia, [2] Stack Overflow, [3] MDN`
 
 	DefaultPromptChat = `You are bap-search, a conversational search engine.
@@ -101,11 +85,9 @@ End your answer with a short "Sources:" line listing each cited source number wi
 )
 
 type LLMPrompts struct {
-	mu         sync.RWMutex
-	Summarize  string
-	Synthesize string
-	Chat       string
-	Memory     string
+	mu     sync.RWMutex
+	Chat   string
+	Memory string
 }
 
 func (p *LLMPrompts) get(field *string, fallback string) string {
@@ -117,19 +99,17 @@ func (p *LLMPrompts) get(field *string, fallback string) string {
 	return *field
 }
 
-func (p *LLMPrompts) Set(summarize, synthesize, chat, memory string) {
+func (p *LLMPrompts) Set(chat, memory string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.Summarize = summarize
-	p.Synthesize = synthesize
 	p.Chat = chat
 	p.Memory = memory
 }
 
-func (p *LLMPrompts) GetAll() (summarize, synthesize, chat, memory string) {
+func (p *LLMPrompts) GetAll() (chat, memory string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.Summarize, p.Synthesize, p.Chat, p.Memory
+	return p.Chat, p.Memory
 }
 
 type llamaChatRequest struct {
@@ -482,46 +462,6 @@ func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Contex
 	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
 }
 
-func (service *LLMService) SummarizePage(ctx context.Context, meta RequestMeta, query, memory, url, text string) (string, error) {
-	text = service.truncateForPrompt(text, 3600)
-
-	prompt := service.Prompts.get(&service.Prompts.Summarize, DefaultPromptSummarize)
-	messages := []LLMMessage{
-		buildSystemMessage(
-			strings.TrimSpace(prompt),
-			optionalSystemSection("User memory", memory),
-		),
-		LLMMessage{Role: "user", Content: fmt.Sprintf("Original query: %s\nSource URL: %s\n\nExtracted page text:\n%s", query, url, text)},
-	}
-
-	return service.Chat(ctx, meta, messages, 320)
-}
-
-func (service *LLMService) SynthesizeSearchAnswer(ctx context.Context, meta RequestMeta, query string, summaries []SummaryRecord) (string, error) {
-	blocks := make([]string, 0, len(summaries))
-	for _, summary := range summaries {
-		trimmed := strings.TrimSpace(summary.Summary)
-		if trimmed == "" {
-			continue
-		}
-		blocks = append(blocks, fmt.Sprintf("Source: %s\n%s", summary.URL, compactContextText(trimmed, 1400)))
-	}
-
-	if len(blocks) == 0 {
-		return "", fmt.Errorf("no summaries available for synthesis")
-	}
-
-	messages := []LLMMessage{
-		buildSystemMessage(strings.TrimSpace(service.Prompts.get(&service.Prompts.Synthesize, DefaultPromptSynthesize))),
-		{
-			Role:    "user",
-			Content: fmt.Sprintf("User query: %s\n\nArticle summaries:\n\n%s", query, service.truncateForPrompt(strings.Join(blocks, "\n\n"), 5600)),
-		},
-	}
-
-	return service.Chat(ctx, meta, messages, 420)
-}
-
 func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, string, error) {
 	messages := []LLMMessage{
 		buildSystemMessage(
@@ -783,29 +723,29 @@ func (service *LLMService) truncateForPrompt(value string, maxChars int) string 
 }
 
 func sanitizeSearchQuery(value string) string {
-       value = strings.TrimSpace(value)
-       value = strings.Trim(value, "\"'`")
-       value = strings.ReplaceAll(value, "\r", " ")
-       value = strings.ReplaceAll(value, "\n", " ")
-       value = strings.TrimPrefix(value, "query:")
-       value = strings.TrimPrefix(value, "Query:")
-       value = strings.Join(strings.Fields(value), " ")
-       // Reject any answer containing <think>, </think>, or other tags, or that looks like reasoning
-       if strings.Contains(value, "<think>") || strings.Contains(value, "</think>") || strings.Contains(value, "Reasoning:") || strings.Contains(value, "Answer:") || strings.Contains(value, "Bullet") || strings.Contains(value, "explanation") || strings.Contains(value, "justification") {
-	       return ""
-       }
-       // Reject if it contains any angle brackets (likely hallucinated tags)
-       if strings.ContainsAny(value, "<>") {
-	       return ""
-       }
-       if len([]rune(value)) > 180 {
-	       value = string([]rune(value)[:180])
-       }
-       value = strings.TrimSpace(strings.Trim(value, "|/\\.,:;_-"))
-       if !isUsableSearchQuery(value) {
-	       return ""
-       }
-       return value
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "\"'`")
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.TrimPrefix(value, "query:")
+	value = strings.TrimPrefix(value, "Query:")
+	value = strings.Join(strings.Fields(value), " ")
+	// Reject any answer containing <think>, </think>, or other tags, or that looks like reasoning
+	if strings.Contains(value, "<think>") || strings.Contains(value, "</think>") || strings.Contains(value, "Reasoning:") || strings.Contains(value, "Answer:") || strings.Contains(value, "Bullet") || strings.Contains(value, "explanation") || strings.Contains(value, "justification") {
+		return ""
+	}
+	// Reject if it contains any angle brackets (likely hallucinated tags)
+	if strings.ContainsAny(value, "<>") {
+		return ""
+	}
+	if len([]rune(value)) > 180 {
+		value = string([]rune(value)[:180])
+	}
+	value = strings.TrimSpace(strings.Trim(value, "|/\\.,:;_-"))
+	if !isUsableSearchQuery(value) {
+		return ""
+	}
+	return value
 }
 
 func isUsableSearchQuery(value string) bool {

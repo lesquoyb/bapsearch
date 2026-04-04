@@ -144,6 +144,8 @@ services:
         condition: service_started
       llama-embeddings:
         condition: service_started
+      searxng:
+        condition: service_healthy
     environment:
       BAP_ADDR: :8081
       BAP_DB_PATH: /database/bap-search.db
@@ -169,9 +171,9 @@ services:
       BAP_LLM_MAX_TOKENS: ${BAP_LLM_MAX_TOKENS:-700}
       BAP_LLM_CONTEXT_TOKENS: ${BAP_LLM_CONTEXT_TOKENS:-8192}
     volumes:
-      - ${BAP_MODELS_PATH:-../models}:/models
-      - ${BAP_LOGS_PATH:-../logs}:/logs
-      - ${BAP_DATABASE_PATH:-../database}:/database
+      - ../models:/models
+      - ../logs:/logs
+      - ../database:/database
     ports:
       - "${BAP_PUBLIC_PORT:-8080}:8081"
     networks:
@@ -185,6 +187,8 @@ services:
       args:
         LLAMA_IMAGE: ${LLAMA_ANSWER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
+    cap_add:
+      - IPC_LOCK
     environment:
       MODEL_DIR: /models
       CURRENT_MODEL_FILE: /models/current-model.txt
@@ -196,12 +200,13 @@ services:
       LLAMA_N_GPU_LAYERS: ${LLAMA_ANSWER_N_GPU_LAYERS:-0}
       LLAMA_MAIN_GPU: ${LLAMA_ANSWER_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_ANSWER_FLASH_ATTN:-false}
-      LLAMA_EXTRA_ARGS: ${LLAMA_ANSWER_EXTRA_ARGS:-}
+      LLAMA_EXTRA_ARGS: ${LLAMA_ANSWER_EXTRA_ARGS:---mlock}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
-      - ${BAP_MODELS_PATH:-../models}:/models
+      - ../models:/models
+      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
@@ -212,6 +217,8 @@ services:
       args:
         LLAMA_IMAGE: ${LLAMA_REWRITE_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
+    cap_add:
+      - IPC_LOCK
     environment:
       MODEL_DIR: /models
       CURRENT_MODEL_FILE: /models/current-rewrite-model.txt
@@ -223,12 +230,13 @@ services:
       LLAMA_N_GPU_LAYERS: ${LLAMA_REWRITE_N_GPU_LAYERS:-0}
       LLAMA_MAIN_GPU: ${LLAMA_REWRITE_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_REWRITE_FLASH_ATTN:-false}
-      LLAMA_EXTRA_ARGS: ${LLAMA_REWRITE_EXTRA_ARGS:-}
+      LLAMA_EXTRA_ARGS: ${LLAMA_REWRITE_EXTRA_ARGS:---mlock}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
-      - ${BAP_MODELS_PATH:-../models}:/models
+      - ../models:/models
+      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
@@ -239,6 +247,8 @@ services:
       args:
         LLAMA_IMAGE: ${LLAMA_EMBEDDINGS_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     restart: always
+    cap_add:
+      - IPC_LOCK
     environment:
       MODEL_DIR: /models
       CURRENT_MODEL_FILE: /models/current-embedding-model.txt
@@ -250,12 +260,13 @@ services:
       LLAMA_N_GPU_LAYERS: ${LLAMA_EMBEDDINGS_N_GPU_LAYERS:-0}
       LLAMA_MAIN_GPU: ${LLAMA_EMBEDDINGS_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_EMBEDDINGS_FLASH_ATTN:-false}
-      LLAMA_EXTRA_ARGS: ${LLAMA_EMBEDDINGS_EXTRA_ARGS:---embeddings --pooling mean --batch-size 2048 --ubatch-size 2048}
+      LLAMA_EXTRA_ARGS: ${LLAMA_EMBEDDINGS_EXTRA_ARGS:---embeddings --pooling mean --batch-size 2048 --ubatch-size 2048 --mlock}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
-      - ${BAP_MODELS_PATH:-../models}:/models
+      - ../models:/models
+      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
@@ -270,6 +281,12 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     networks:
       - public
       - internal

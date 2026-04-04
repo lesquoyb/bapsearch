@@ -43,6 +43,15 @@
     });
   }
 
+  function bapInitEngineOverflow() {
+    var scroller = document.querySelector('.engine-chips-scroller');
+    var overflow = document.querySelector('.engine-overflow-hover');
+    if (!scroller || !overflow) return;
+    window.requestAnimationFrame(function () {
+      overflow.hidden = scroller.scrollHeight <= scroller.clientHeight + 2;
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     var resultsPanel = document.getElementById('results-panel');
     if (resultsPanel) bapApplyResultsLimit(resultsPanel);
@@ -59,6 +68,7 @@
     });
 
     bapRenderMath(document.body);
+    bapInitEngineOverflow();
   });
 
   document.body.addEventListener('htmx:afterSwap', function (event) {
@@ -74,6 +84,11 @@
   }
 
   function bapMakeReasoningDetails() {
+    // Close all reasoning not open manually
+    var allReasoning = document.querySelectorAll('.reasoning-block');
+    allReasoning.forEach(function(rb) {
+      if (rb.dataset.manuallyToggled !== 'true') rb.open = false;
+    });
     var details = document.createElement('details');
     details.className = 'reasoning-block';
     details.open = true;
@@ -98,7 +113,7 @@
 
     var aBody = document.createElement('div');
     aBody.className = 'message-body markdown-body';
-    aBody.textContent = 'Processing...';
+    aBody.appendChild(bapMakeTypingDots());
     var aBubble = document.createElement('article');
     aBubble.className = 'message message-assistant';
     aBubble.innerHTML = '<div class="message-role">assistant</div>';
@@ -142,8 +157,8 @@
               var html = await fetch(refreshUrl).then(function (r) { return r.text(); });
               chatMessages.innerHTML = html;
               bapRenderMath(chatMessages);
-              var spinner = document.getElementById('summary-spinner');
-              if (spinner) spinner.style.display = 'none';
+              var capsule = document.getElementById('processing-capsule');
+              if (capsule) capsule.style.display = 'none';
             } else if (evtName === 'search_limit') {
               bapCloseReasoningIfAuto(aReasoningDetails);
               try {
@@ -160,9 +175,20 @@
                   var pre = document.createElement('pre');
                   pre.className = 'reasoning-content';
                   details.appendChild(pre);
-                  aBubble.insertBefore(details, aBody);
+                  var lastThread = chatMessages.lastElementChild;
+                  if (lastThread && lastThread.classList.contains('chat-thread')) {
+                    var lastBubble = lastThread.querySelector('.message.message-assistant');
+                    if (lastBubble) {
+                      lastBubble.appendChild(details);
+                    } else {
+                      aBubble.appendChild(details);
+                    }
+                  } else {
+                    aBubble.appendChild(details);
+                  }
                   aReasoning = pre;
                   aReasoningDetails = details;
+                  bapClearTypingDots(aBody);
                 }
                 aReasoning.textContent = reasoningAccumulated;
                 bapAutoScrollReasoning(aReasoning);
@@ -184,14 +210,16 @@
             } else if (evtName === 'status') {
               try {
                 var st = JSON.parse(dataLine);
-                if (!accumulated && st) aBody.textContent = st;
+                if (!accumulated && st) { bapClearTypingDots(aBody); aBody.textContent = st; }
               } catch (_) {}
             } else if (evtName === 'error') {
+              bapClearTypingDots(aBody);
               try { aBody.textContent = JSON.parse(dataLine); } catch (_) { aBody.textContent = dataLine; }
               aBubble.className = 'message message-system';
             } else if (dataLine) {
               try {
                 accumulated += JSON.parse(dataLine);
+                bapClearTypingDots(aBody);
                 aBody.textContent = accumulated;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch (_) {}
@@ -200,6 +228,7 @@
         }
       })
       .catch(function (err) {
+        bapClearTypingDots(aBody);
         aBody.textContent = 'Connection error: ' + err.message;
       });
   }
@@ -234,7 +263,18 @@
     actions.appendChild(continueBtn);
     actions.appendChild(summarizeBtn);
     limitDiv.appendChild(actions);
-    targetBody.appendChild(limitDiv);
+    // Place le prompt search-limit tout en bas de la conversation
+    var lastThread = chatMessages.lastElementChild;
+    if (lastThread && lastThread.classList.contains('chat-thread')) {
+      var lastBubble = lastThread.querySelector('.message.message-assistant');
+      if (lastBubble) {
+        lastBubble.appendChild(limitDiv);
+      } else {
+        lastThread.appendChild(limitDiv);
+      }
+    } else {
+      chatMessages.appendChild(limitDiv);
+    }
   }
 
   (function () {
@@ -251,7 +291,6 @@
       }
 
       var chatMessages = document.getElementById('chat-messages');
-      var spinnerText = document.getElementById('summary-spinner-text');
       if (!chatMessages) return;
 
       anchor.dataset.inFlight = 'true';
@@ -269,7 +308,7 @@
       if (!aThread) {
         aBody = document.createElement('div');
         aBody.className = 'message-body markdown-body';
-        aBody.textContent = 'Waiting for ranked sources...';
+        aBody.appendChild(bapMakeTypingDots());
 
         aBubble = document.createElement('article');
         aBubble.className = 'message message-assistant';
@@ -316,19 +355,22 @@
                 try {
                   var sq = JSON.parse(dataLine);
                   bapCloseReasoningIfAuto(aReasoningDetails);
-                  bapInsertSearchQueryPill(aThread, aBubble, sq);
+                  var next = bapHandleSearchQuery(aThread, aBubble, sq);
+                  aBubble = next.aBubble;
+                  aBody = next.aBody;
                   accumulated = '';
                   reasoningAccumulated = '';
                   aReasoning = null;
                   aReasoningDetails = null;
-                  aBody.textContent = '';
                   chatMessages.scrollTop = chatMessages.scrollHeight;
                 } catch (_) {}
               } else if (evtName === 'status') {
                 try {
                   var statusText = JSON.parse(dataLine);
-                  if (spinnerText && statusText) spinnerText.textContent = statusText;
-                  if (!accumulated && !reasoningAccumulated && statusText) aBody.textContent = statusText;
+                  if (!accumulated && !reasoningAccumulated && statusText) {
+                    bapClearTypingDots(aBody);
+                    aBody.textContent = statusText;
+                  }
                 } catch (_) {}
               } else if (evtName === 'reasoning') {
                 try {
@@ -342,6 +384,7 @@
                     aBubble.insertBefore(details, aBody);
                     aReasoning = pre;
                     aReasoningDetails = details;
+                    bapClearTypingDots(aBody);
                     aBody.textContent = '';
                   }
                   aReasoning.textContent = reasoningAccumulated;
@@ -362,8 +405,8 @@
                 completed = true;
                 anchor.dataset.complete = 'true';
                 anchor.dataset.enabled = 'false';
-                var spinner = document.getElementById('summary-spinner');
-                if (spinner) spinner.style.display = 'none';
+                var capsule = document.getElementById('processing-capsule');
+                if (capsule) capsule.style.display = 'none';
                 if (!searchLimitPending) {
                   var html = await fetch(anchor.dataset.refreshUrl).then(function (r) { return r.text(); });
                   chatMessages.innerHTML = html;
@@ -372,6 +415,7 @@
               } else if (evtName === 'error') {
                 var errorText = dataLine;
                 try { errorText = JSON.parse(dataLine); } catch (_) {}
+                bapClearTypingDots(aBody);
                 aBody.textContent = errorText;
                 aBubble.className = 'message message-system';
                 if (errorText.indexOf('still preparing') !== -1 || errorText.indexOf('No ranked source') !== -1) {
@@ -380,6 +424,7 @@
               } else if (dataLine) {
                 try {
                   accumulated += JSON.parse(dataLine);
+                  bapClearTypingDots(aBody);
                   aBody.textContent = accumulated;
                   chatMessages.scrollTop = chatMessages.scrollHeight;
                 } catch (_) {}
@@ -446,6 +491,7 @@
       // Append streaming assistant bubble
       var aBody = document.createElement('div');
       aBody.className = 'message-body markdown-body';
+      aBody.appendChild(bapMakeTypingDots());
       var aBubble = document.createElement('article');
       aBubble.className = 'message message-assistant';
       aBubble.innerHTML = '<div class="message-role">assistant</div>';
@@ -536,17 +582,20 @@
                   aBubble.insertBefore(details, aBody);
                   aReasoning = pre;
                   aReasoningDetails = details;
+                  bapClearTypingDots(aBody);
                 }
                 aReasoning.textContent = reasoningAccumulated;
                 bapAutoScrollReasoning(aReasoning);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch(_) {}
             } else if (evtName === 'error') {
+              bapClearTypingDots(aBody);
               try { aBody.textContent = JSON.parse(dataLine); } catch(_) { aBody.textContent = dataLine; }
               aBubble.className = 'message message-system';
             } else if (dataLine) {
               try {
                 accumulated += JSON.parse(dataLine);
+                bapClearTypingDots(aBody);
                 aBody.textContent = accumulated;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch(_) {}
@@ -713,6 +762,18 @@
     return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  function bapMakeTypingDots() {
+    var dots = document.createElement('div');
+    dots.className = 'typing-dots';
+    dots.innerHTML = '<span></span><span></span><span></span>';
+    return dots;
+  }
+
+  function bapClearTypingDots(body) {
+    var dots = body.querySelector('.typing-dots');
+    if (dots) dots.remove();
+  }
+
   // Inserts a search-query pill after the current bubble and appends a new
   // assistant bubble for the next response cycle. Returns { aBubble, aBody }.
   function bapHandleSearchQuery(aThread, aBubble, query) {
@@ -728,6 +789,7 @@
     // New assistant bubble for the next generation cycle
     var newBody = document.createElement('div');
     newBody.className = 'message-body markdown-body';
+    newBody.appendChild(bapMakeTypingDots());
     var newBubble = document.createElement('article');
     newBubble.className = 'message message-assistant';
     newBubble.innerHTML = '<div class="message-role">assistant</div>';
@@ -904,7 +966,7 @@
   {{ range $i, $r := .SearchResults }}
   {{ $summary := index $.SummaryLookup $r.URL }}
   <article class="card result-card{{ if eq $r.QueryVariant "rewritten" }} result-card--rewritten{{ end }}{{ if eq $r.QueryVariant "iterative" }} result-card--iterative{{ end }}" data-variant="{{ $r.QueryVariant }}" data-result-index="{{ $i }}">
-    <span class="result-status-dot result-status-dot-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ else }}title="{{ summaryStatusLabel $summary.Status }}"{{ end }}></span>
+    <span class="result-status-dot result-status-dot-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}></span>
     <div class="result-card-topline">
       <div class="source-hover" tabindex="0">
         <div class="source-hover-head">
@@ -913,21 +975,12 @@
           <span class="eyebrow source-hover-label">{{ siteName $r.URL }}</span>
           </div>
         </div>
-        <div class="source-summary-popover" role="dialog" aria-label="Summary preview for {{ siteName $r.URL }}">
-          <div class="popover-header-row">
-            <div class="popover-label">Indexed source</div>
-            <span class="summary-status summary-status-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}>{{ summaryStatusLabel $summary.Status }}</span>
-          </div>
+        <div class="source-summary-popover" role="dialog" aria-label="Source info for {{ siteName $r.URL }}">
           {{ if gt $summary.SimilarityScore 0.0 }}
           <p class="summary-status-detail">Similarity: {{ printf "%.4f" $summary.SimilarityScore }}</p>
           {{ end }}
-          {{ if $summary.Detail }}
-          <p class="summary-status-detail">{{ $summary.Detail }}</p>
-          {{ end }}
-          {{ if $summary.Summary }}
-          <div class="markdown-body markdown-compact">{{ markdown $summary.Summary }}</div>
-          {{ else }}
-          <p class="muted">This will automatically update as extraction and ranking progress.</p>
+          {{ if $summary.SourceText }}
+          <p class="summary-source-excerpt">{{ truncate $summary.SourceText 400 }}</p>
           {{ end }}
         </div>
       </div>
@@ -938,7 +991,10 @@
   {{ end }}
 </div>
 {{ else }}
-<p class="muted">No raw results stored for this conversation.</p>
+<div class="results-loading">
+  <div class="spinner" style="margin: 32px auto;" aria-label="Chargement résultats"></div>
+  <p class="muted">Fetching results...</p>
+</div>
 {{ end }}
 {{ end }}
 
@@ -946,26 +1002,12 @@
 {{ if .OverviewSummary }}
 <div class="summary-ready-flag" hidden></div>
 {{ else }}
-<div class="card pending-card">
-  <div class="eyebrow">Processing</div>
-  <p>Current phase: {{ if .AnswerStatus }}{{ .AnswerStatus }}{{ else }}pending{{ end }}. Indexed sources: {{ .ReadySummaryCount }}&thinsp;/&thinsp;{{ .SummaryTarget }}.</p>
-  <p class="muted">Original query: {{ .Title }}</p>
-  <p class="muted">Rewrite status: {{ rewriteStatusLabel .RewriteStatus }}.</p>
-  {{ if .RewrittenQuery }}
-  <p class="muted">Optimized search query: {{ .RewrittenQuery }}</p>
-  {{ else }}
-  <p class="muted">Optimized search query: none. The original query is being used.</p>
-  {{ end }}
-  <p class="muted">Raw result counts: original {{ .OriginalResultCount }}, rewritten {{ .RewrittenResultCount }}.</p>
-  {{ if .RewriteDetail }}
-  <p class="muted">{{ .RewriteDetail }}</p>
-  {{ end }}
-  {{ if .AnswerDetail }}
-  <p class="muted">{{ .AnswerDetail }}</p>
-  {{ else }}
-  <p class="muted">The final answer will stream here automatically as soon as the reranked sources are ready.</p>
-  {{ end }}
-</div>
+<div class="summaries-status" hidden
+  data-status="{{ if .AnswerStatus }}{{ .AnswerStatus }}{{ else }}pending{{ end }}"
+  data-sources="{{ .ReadySummaryCount }}/{{ .SummaryTarget }}"
+  data-rewrite="{{ rewriteStatusLabel .RewriteStatus }}"
+  data-query="{{ .RewrittenQuery }}"
+  data-detail="{{ .AnswerDetail }}"></div>
 {{ end }}
 {{ end }}
 

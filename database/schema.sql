@@ -58,7 +58,6 @@ CREATE TABLE IF NOT EXISTS summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id INTEGER NOT NULL,
     url TEXT NOT NULL,
-    summary TEXT NOT NULL DEFAULT '',
     source_text TEXT NOT NULL DEFAULT '',
     embedding_json TEXT NOT NULL DEFAULT '',
     similarity_score REAL NOT NULL DEFAULT 0,

@@ -2,6 +2,7 @@ use_default_settings:
   engines:
     remove:
       - google
+      - duckduckgo
 server:
   secret_key: "change-me-in-production"
   limiter: false
@@ -25,3 +26,4 @@ outgoing:
   enable_http2: false
 ui:
   static_use_hash: true
+brand: {}

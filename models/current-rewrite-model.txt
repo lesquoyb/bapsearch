@@ -1,1 +1,1 @@
-LaMini-Flan-T5-77M.F16.gguf
+Phi-4-mini-instruct.Q8_0.gguf
