@@ -471,27 +471,32 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, readyConversation.Title, reply)
-		if newSearchQuery == "" {
+		newSearchQueries, trigger := app.resolveFollowUpSearchQueries(r.Context(), replyMeta, readyConversation.Title, reply)
+		if len(newSearchQueries) == 0 {
 			break
 		}
 
 		searchLoop++
 		didInlineSearch = true
-		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
+		for _, q := range newSearchQueries {
+			_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, q)
+			writeEvent("search_query", q)
+		}
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "answer_stream",
 			"loop", searchLoop,
 			"trigger", trigger,
-			"query", newSearchQuery,
+			"queries", newSearchQueries,
 			"current_sources", len(currentSources),
 		)
-		writeEvent("search_query", newSearchQuery)
 
-		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, nil)
-		newSources, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		intentEmbs := make([][]float64, len(newSearchQueries))
+		for i, q := range newSearchQueries {
+			intentEmbs[i] = app.generateIntentEmbedding(r.Context(), replyMeta, q, nil)
+		}
+		newSources, processErr := app.inlineSearchAndProcessMultiple(r.Context(), replyMeta, conversationID, newSearchQueries, intentEmbs)
 		if processErr != nil || len(newSources) == 0 {
-			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "queries", newSearchQueries, "error", processErr)
 			break
 		}
 
@@ -500,7 +505,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		if app.cfg.SummarizeURLLimit > 0 && len(currentSources) > app.cfg.SummarizeURLLimit {
 			currentSources = currentSources[:app.cfg.SummarizeURLLimit]
 		}
-		currentQuery = newSearchQuery
+		currentQuery = newSearchQueries[0]
 	}
 
 	// Re-rank all documents against the original query in the background so that
@@ -635,25 +640,30 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, message, reply)
-		if newSearchQuery == "" {
+		newSearchQueries, trigger := app.resolveFollowUpSearchQueries(r.Context(), replyMeta, message, reply)
+		if len(newSearchQueries) == 0 {
 			break
 		}
 
 		didInlineSearch = true
-		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
+		for _, q := range newSearchQueries {
+			_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, q)
+			writeEvent("search_query", q)
+		}
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_stream",
 			"loop", loop+1,
 			"trigger", trigger,
-			"query", newSearchQuery,
+			"queries", newSearchQueries,
 		)
-		writeEvent("search_query", newSearchQuery)
 
-		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		ranked, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		intentEmbs := make([][]float64, len(newSearchQueries))
+		for i, q := range newSearchQueries {
+			intentEmbs[i] = app.generateIntentEmbedding(r.Context(), replyMeta, q, history)
+		}
+		ranked, processErr := app.inlineSearchAndProcessMultiple(r.Context(), replyMeta, conversationID, newSearchQueries, intentEmbs)
 		if processErr != nil {
-			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "queries", newSearchQueries, "error", processErr)
 			break
 		}
 
@@ -788,25 +798,30 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 			return
 		}
 
-		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, message, reply)
-		if newSearchQuery == "" {
+		newSearchQueries, trigger := app.resolveFollowUpSearchQueries(r.Context(), replyMeta, message, reply)
+		if len(newSearchQueries) == 0 {
 			break
 		}
 
 		didInlineSearch = true
-		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
+		for _, q := range newSearchQueries {
+			_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, q)
+			writeEvent("search_query", q)
+		}
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_regenerate_stream",
 			"loop", loop+1,
 			"trigger", trigger,
-			"query", newSearchQuery,
+			"queries", newSearchQueries,
 		)
-		writeEvent("search_query", newSearchQuery)
 
-		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		ranked, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		intentEmbs := make([][]float64, len(newSearchQueries))
+		for i, q := range newSearchQueries {
+			intentEmbs[i] = app.generateIntentEmbedding(r.Context(), replyMeta, q, history)
+		}
+		ranked, processErr := app.inlineSearchAndProcessMultiple(r.Context(), replyMeta, conversationID, newSearchQueries, intentEmbs)
 		if processErr != nil {
-			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "queries", newSearchQueries, "error", processErr)
 			break
 		}
 
@@ -935,22 +950,27 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 			return
 		}
 
-		newSearchQuery, trigger := app.resolveFollowUpSearchQuery(r.Context(), replyMeta, query, reply)
-		if newSearchQuery == "" {
+		newSearchQueries, trigger := app.resolveFollowUpSearchQueries(r.Context(), replyMeta, query, reply)
+		if len(newSearchQueries) == 0 {
 			break
 		}
 
-		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
+		for _, q := range newSearchQueries {
+			_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, q)
+			writeEvent("search_query", q)
+		}
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "search_more",
 			"loop", loop+1,
 			"trigger", trigger,
-			"query", newSearchQuery,
+			"queries", newSearchQueries,
 		)
-		writeEvent("search_query", newSearchQuery)
 
-		moreIntentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, moreIntentEmb)
+		moreIntentEmbs := make([][]float64, len(newSearchQueries))
+		for i, q := range newSearchQueries {
+			moreIntentEmbs[i] = app.generateIntentEmbedding(r.Context(), replyMeta, q, history)
+		}
+		_, processErr := app.inlineSearchAndProcessMultiple(r.Context(), replyMeta, conversationID, newSearchQueries, moreIntentEmbs)
 		if processErr != nil {
 			break
 		}
@@ -1063,22 +1083,40 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 	writeEvent("done", "")
 }
 
-// detectNeedMoreSearch scans LLM output for the <<NEED_MORE_SEARCH: query>> signal.
+// detectNeedMoreSearch scans LLM output for the first <<NEED_MORE_SEARCH: query>> signal.
 // It ignores any occurrence inside <think>...</think> blocks.
 func detectNeedMoreSearch(text string) string {
-	text = thinkBlockPattern.ReplaceAllString(text, "")
-	matches := needMoreSearchPattern.FindStringSubmatch(text)
-	if len(matches) < 2 {
+	queries := detectAllNeedMoreSearch(text)
+	if len(queries) == 0 {
 		return ""
 	}
-	query := strings.TrimSpace(matches[1])
-	if cleaned := sanitizeSearchQuery(query); cleaned != "" {
-		return cleaned
+	return queries[0]
+}
+
+// detectAllNeedMoreSearch returns all distinct search queries requested by the LLM
+// via <<NEED_MORE_SEARCH: query>> tags, ignoring occurrences inside <think> blocks.
+func detectAllNeedMoreSearch(text string) []string {
+	text = thinkBlockPattern.ReplaceAllString(text, "")
+	matches := needMoreSearchPattern.FindAllStringSubmatch(text, -1)
+	var queries []string
+	seen := map[string]bool{}
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		query := strings.TrimSpace(m[1])
+		if query == "" || seen[query] {
+			continue
+		}
+		if cleaned := sanitizeSearchQuery(query); cleaned != "" {
+			seen[cleaned] = true
+			queries = append(queries, cleaned)
+		} else {
+			seen[query] = true
+			queries = append(queries, query)
+		}
 	}
-	if query != "" {
-		return query
-	}
-	return ""
+	return queries
 }
 
 // stripNeedMoreSearch removes the <<NEED_MORE_SEARCH: ...>> tag and any residual
@@ -1101,24 +1139,51 @@ func (app *App) maxSearchLoops(ctx context.Context) int {
 }
 
 func (app *App) resolveFollowUpSearchQuery(ctx context.Context, meta RequestMeta, userRequest, reply string) (string, string) {
-	if explicit := detectNeedMoreSearch(reply); explicit != "" {
-		// Always rewrite the model's raw query for better search quality.
-		if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, explicit); err == nil && strings.TrimSpace(rewritten) != "" {
-			return rewritten, "model_need_more_search:rewritten"
+	queries, trigger := app.resolveFollowUpSearchQueries(ctx, meta, userRequest, reply)
+	if len(queries) == 0 {
+		return "", ""
+	}
+	return queries[0], trigger
+}
+
+// resolveFollowUpSearchQueries returns all search queries to execute next.
+// When the LLM explicitly requests multiple searches via <<NEED_MORE_SEARCH>> tags,
+// each is rewritten in parallel for quality. Falls back to a single auto-detected
+// query when no explicit tags are present.
+func (app *App) resolveFollowUpSearchQueries(ctx context.Context, meta RequestMeta, userRequest, reply string) ([]string, string) {
+	if explicits := detectAllNeedMoreSearch(reply); len(explicits) > 0 {
+		type result struct {
+			index int
+			query string
 		}
-		return explicit, "model_need_more_search"
+		ch := make(chan result, len(explicits))
+		for i, q := range explicits {
+			go func(idx int, raw string) {
+				if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, raw); err == nil && strings.TrimSpace(rewritten) != "" {
+					ch <- result{idx, strings.TrimSpace(rewritten)}
+				} else {
+					ch <- result{idx, raw}
+				}
+			}(i, q)
+		}
+		rewritten := make([]string, len(explicits))
+		for range explicits {
+			r := <-ch
+			rewritten[r.index] = r.query
+		}
+		return rewritten, "model_need_more_search"
 	}
 	trigger := followUpSearchTrigger(userRequest, reply)
 	if trigger == "" {
-		return "", ""
+		return nil, ""
 	}
 	if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, userRequest); err == nil && strings.TrimSpace(rewritten) != "" {
-		return rewritten, trigger + ":rewrite_model"
+		return []string{rewritten}, trigger + ":rewrite_model"
 	}
 	if cleaned := sanitizeSearchQuery(userRequest); cleaned != "" {
-		return cleaned, trigger + ":sanitized_user_request"
+		return []string{cleaned}, trigger + ":sanitized_user_request"
 	}
-	return strings.TrimSpace(userRequest), trigger + ":raw_user_request"
+	return []string{strings.TrimSpace(userRequest)}, trigger + ":raw_user_request"
 }
 
 func (app *App) shouldAutoSearchReply(reply, userRequest string) bool {
@@ -1314,6 +1379,101 @@ func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, co
 		return nil, fmt.Errorf("re-ranking sources failed: %w", err)
 	}
 
+	return ranked, nil
+}
+
+// inlineSearchAndProcessMultiple runs multiple searches in parallel, merges all
+// new results, and re-ranks everything once. The combined ranked list is returned.
+// If only one query is provided it behaves identically to inlineSearchAndProcess.
+func (app *App) inlineSearchAndProcessMultiple(ctx context.Context, meta RequestMeta, conversationID int64, queries []string, intentEmbeddings [][]float64) ([]RankedSource, error) {
+	if len(queries) == 1 {
+		var emb []float64
+		if len(intentEmbeddings) > 0 {
+			emb = intentEmbeddings[0]
+		}
+		return app.inlineSearchAndProcess(ctx, meta, conversationID, queries[0], emb)
+	}
+
+	type batchResult struct {
+		inserted []SearchResult
+		err      error
+	}
+	ch := make(chan batchResult, len(queries))
+
+	for _, q := range queries {
+		go func(query string) {
+			searchResp, err := app.search.Search(ctx, query)
+			if err != nil || len(searchResp.Results) == 0 {
+				ch <- batchResult{err: err}
+				return
+			}
+			for i := range searchResp.Results {
+				searchResp.Results[i].QueryVariant = "iterative"
+				searchResp.Results[i].QueryText = query
+			}
+			inserted, err := app.conversations.AppendSearchResults(ctx, conversationID, searchResp.Results, searchResp.EngineStatus)
+			ch <- batchResult{inserted: inserted, err: err}
+		}(q)
+	}
+
+	var allInserted []SearchResult
+	for range queries {
+		r := <-ch
+		if r.err == nil {
+			allInserted = append(allInserted, r.inserted...)
+		}
+	}
+
+	if len(allInserted) == 0 {
+		return nil, fmt.Errorf("no new results after parallel search and deduplication")
+	}
+
+	limit := app.cfg.SummarizeURLLimit
+	if limit <= 0 {
+		limit = 3
+	}
+	toFetch := allInserted
+	if len(toFetch) > limit*len(queries) {
+		toFetch = toFetch[:limit*len(queries)]
+	}
+
+	docCh := app.fetch.FetchAndExtractChan(ctx, meta, toFetch, func(url, status, detail string) {
+		app.conversations.UpdateSummaryStatus(ctx, conversationID, url, status, detail)
+	})
+
+	for doc := range docCh {
+		text := strings.TrimSpace(doc.Text)
+		if text == "" || len([]rune(text)) < 80 {
+			continue
+		}
+		_ = app.conversations.StoreSourceText(ctx, conversationID, doc.URL, text)
+		embedding, err := app.llm.EmbedText(ctx, meta, text)
+		if err != nil {
+			continue
+		}
+		embeddingJSON, err := json.Marshal(embedding)
+		if err != nil {
+			continue
+		}
+		_ = app.conversations.UpdateDocumentEmbedding(ctx, conversationID, doc.URL, string(embeddingJSON))
+	}
+
+	// Use first intent embedding (or first query) for ranking
+	var rankEmbedding []float64
+	if len(intentEmbeddings) > 0 && len(intentEmbeddings[0]) > 0 {
+		rankEmbedding = intentEmbeddings[0]
+	} else {
+		var err error
+		rankEmbedding, err = app.llm.EmbedText(ctx, meta, queries[0])
+		if err != nil {
+			return nil, fmt.Errorf("query embedding failed: %w", err)
+		}
+	}
+
+	ranked, err := app.conversations.RerankAllSources(ctx, app.logger, conversationID, rankEmbedding)
+	if err != nil {
+		return nil, fmt.Errorf("re-ranking sources failed: %w", err)
+	}
 	return ranked, nil
 }
 

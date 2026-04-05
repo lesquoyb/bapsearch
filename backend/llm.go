@@ -68,9 +68,10 @@ End your answer with a short "Sources:" line listing each cited source number wi
 	// SearchToolInstructions is ALWAYS injected into chat and grounded answer
 	// system prompts. It is not user-customizable and not stored in the DB.
 	// This ensures the LLM always knows how to request a new search.
-	SearchToolInstructions = `You have one special action available: request a new web search by outputting this line alone, with nothing else before or after it:
-<<NEED_MORE_SEARCH: your search query in plain text>>
-Use this action when the provided context does not contain enough information to answer the user. Do not answer the question at the same time — the search action replaces your response entirely.
+	SearchToolInstructions = `You have one special action available: request web searches by outputting one or more lines in this exact format, with nothing else before or after them:
+<<NEED_MORE_SEARCH: first search query>>
+<<NEED_MORE_SEARCH: second search query>>
+Use this action when the provided context does not contain enough information to answer the user. You may request multiple searches at once when different aspects of the question need separate queries — they will run in parallel. Do not answer the question at the same time — the search lines replace your response entirely.
 Do not suggest the user visit websites or search manually. If the context is insufficient, use the search action rather than refusing.`
 
 	ForceAnswerInstruction = `You MUST answer using ONLY the information already provided in the search context. Do NOT use the <<NEED_MORE_SEARCH>> tag. Synthesize the best possible answer from the available sources, even if the coverage is incomplete. Acknowledge any gaps briefly, then give the most helpful answer you can.`
