@@ -68,16 +68,10 @@ End your answer with a short "Sources:" line listing each cited source number wi
 	// SearchToolInstructions is ALWAYS injected into chat and grounded answer
 	// system prompts. It is not user-customizable and not stored in the DB.
 	// This ensures the LLM always knows how to request a new search.
-	SearchToolInstructions = `MANDATORY RULES — follow these without exception:
-- You have a tool: to request a new web search, output ONLY a line exactly like:
-  <<NEED_MORE_SEARCH: your search query in plain text>>
-  When you output this line, do NOT answer the question — output ONLY the NEED_MORE_SEARCH line.
-- You MUST use this tool when the provided context does not contain what the user asks for.
-- You MUST use this tool when the user asks for a different example, another item, more details, or something specific that is missing from the context.
-- NEVER suggest the user visit a website, click a link, or search manually.
-- NEVER recommend external sites by name or URL.
-- NEVER say "I suggest you consult", "you can find it at", "try searching for", or anything similar.
-- If you cannot answer from the provided context, use <<NEED_MORE_SEARCH: ...>> instead of refusing or deflecting.`
+	SearchToolInstructions = `You have one special action available: request a new web search by outputting this line alone, with nothing else before or after it:
+<<NEED_MORE_SEARCH: your search query in plain text>>
+Use this action when the provided context does not contain enough information to answer the user. Do not answer the question at the same time — the search action replaces your response entirely.
+Do not suggest the user visit websites or search manually. If the context is insufficient, use the search action rather than refusing.`
 
 	ForceAnswerInstruction = `You MUST answer using ONLY the information already provided in the search context. Do NOT use the <<NEED_MORE_SEARCH>> tag. Synthesize the best possible answer from the available sources, even if the coverage is incomplete. Acknowledge any gaps briefly, then give the most helpful answer you can.`
 

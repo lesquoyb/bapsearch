@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS search_results (
     title TEXT NOT NULL,
     snippet TEXT NOT NULL,
     query_variant TEXT NOT NULL DEFAULT 'original',
+    query_text TEXT NOT NULL DEFAULT '',
     rank INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE

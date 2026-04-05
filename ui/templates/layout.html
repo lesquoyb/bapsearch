@@ -69,10 +69,14 @@
 
     bapRenderMath(document.body);
     bapInitEngineOverflow();
+    bapMovePillsIntoMessages(document);
   });
 
   document.body.addEventListener('htmx:afterSwap', function (event) {
     bapRenderMath(event.target);
+    if (event.target.id === 'chat-messages' || event.target.closest('#chat-messages')) {
+      bapMovePillsIntoMessages(event.target);
+    }
   });
 
   function bapAutoScrollReasoning(pre) {
@@ -81,6 +85,12 @@
     if (details && details.open) {
       pre.scrollTop = pre.scrollHeight;
     }
+  }
+
+  // Append a text token to an element without rewriting its full content.
+  function bapAppendToken(el, token) {
+    if (!el || !token) return;
+    el.appendChild(document.createTextNode(token));
   }
 
   function bapMakeReasoningDetails() {
@@ -110,6 +120,7 @@
   function bapStartContinuationStream(basePath, url, formData, chatMessages, refreshUrl) {
     var limitThread = chatMessages.querySelector('.search-limit-thread');
     if (limitThread) limitThread.remove();
+    window.bapStreamInFlight = true;
 
     var aBody = document.createElement('div');
     aBody.className = 'message-body markdown-body';
@@ -154,9 +165,11 @@
 
             if (evtName === 'done') {
               bapCloseReasoningIfAuto(aReasoningDetails);
+              window.bapStreamInFlight = false;
               var html = await fetch(refreshUrl).then(function (r) { return r.text(); });
               chatMessages.innerHTML = html;
               bapRenderMath(chatMessages);
+              bapMovePillsIntoMessages(chatMessages);
               var capsule = document.getElementById('processing-capsule');
               if (capsule) capsule.style.display = 'none';
             } else if (evtName === 'search_limit') {
@@ -169,28 +182,17 @@
             } else if (evtName === 'reasoning') {
               try {
                 var rToken = JSON.parse(dataLine);
-                reasoningAccumulated += rToken;
                 if (!aReasoning) {
                   var details = bapMakeReasoningDetails();
                   var pre = document.createElement('pre');
                   pre.className = 'reasoning-content';
                   details.appendChild(pre);
-                  var lastThread = chatMessages.lastElementChild;
-                  if (lastThread && lastThread.classList.contains('chat-thread')) {
-                    var lastBubble = lastThread.querySelector('.message.message-assistant');
-                    if (lastBubble) {
-                      lastBubble.appendChild(details);
-                    } else {
-                      aBubble.appendChild(details);
-                    }
-                  } else {
-                    aBubble.appendChild(details);
-                  }
+                  aBubble.insertBefore(details, aBody);
                   aReasoning = pre;
                   aReasoningDetails = details;
                   bapClearTypingDots(aBody);
                 }
-                aReasoning.textContent = reasoningAccumulated;
+                bapAppendToken(aReasoning, rToken);
                 bapAutoScrollReasoning(aReasoning);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch (_) {}
@@ -202,7 +204,6 @@
                 aBubble = next.aBubble;
                 aBody = next.aBody;
                 accumulated = '';
-                reasoningAccumulated = '';
                 aReasoning = null;
                 aReasoningDetails = null;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -218,9 +219,10 @@
               aBubble.className = 'message message-system';
             } else if (dataLine) {
               try {
-                accumulated += JSON.parse(dataLine);
+                var token = JSON.parse(dataLine);
                 bapClearTypingDots(aBody);
-                aBody.textContent = accumulated;
+                bapAppendToken(aBody, token);
+                accumulated += token;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch (_) {}
             }
@@ -228,6 +230,7 @@
         }
       })
       .catch(function (err) {
+        window.bapStreamInFlight = false;
         bapClearTypingDots(aBody);
         aBody.textContent = 'Connection error: ' + err.message;
       });
@@ -294,6 +297,7 @@
       if (!chatMessages) return;
 
       anchor.dataset.inFlight = 'true';
+      window.bapStreamInFlight = true;
 
       var convBody = document.getElementById('conversation-body');
       if (convBody) convBody.classList.add('conversation-body--split');
@@ -375,7 +379,6 @@
               } else if (evtName === 'reasoning') {
                 try {
                   var rToken = JSON.parse(dataLine);
-                  reasoningAccumulated += rToken;
                   if (!aReasoning) {
                     var details = bapMakeReasoningDetails();
                     var pre = document.createElement('pre');
@@ -387,7 +390,7 @@
                     bapClearTypingDots(aBody);
                     aBody.textContent = '';
                   }
-                  aReasoning.textContent = reasoningAccumulated;
+                  bapAppendToken(aReasoning, rToken);
                   bapAutoScrollReasoning(aReasoning);
                   chatMessages.scrollTop = chatMessages.scrollHeight;
                 } catch (_) {}
@@ -405,16 +408,19 @@
                 completed = true;
                 anchor.dataset.complete = 'true';
                 anchor.dataset.enabled = 'false';
+                window.bapStreamInFlight = false;
                 var capsule = document.getElementById('processing-capsule');
                 if (capsule) capsule.style.display = 'none';
                 if (!searchLimitPending) {
                   var html = await fetch(anchor.dataset.refreshUrl).then(function (r) { return r.text(); });
                   chatMessages.innerHTML = html;
                   bapRenderMath(chatMessages);
+                  bapMovePillsIntoMessages(chatMessages);
                 }
               } else if (evtName === 'error') {
                 var errorText = dataLine;
                 try { errorText = JSON.parse(dataLine); } catch (_) {}
+                window.bapStreamInFlight = false;
                 bapClearTypingDots(aBody);
                 aBody.textContent = errorText;
                 aBubble.className = 'message message-system';
@@ -423,9 +429,10 @@
                 }
               } else if (dataLine) {
                 try {
-                  accumulated += JSON.parse(dataLine);
+                  var token = JSON.parse(dataLine);
                   bapClearTypingDots(aBody);
-                  aBody.textContent = accumulated;
+                  bapAppendToken(aBody, token);
+                  accumulated += token;
                   chatMessages.scrollTop = chatMessages.scrollHeight;
                 } catch (_) {}
               }
@@ -437,6 +444,7 @@
           }
         })
         .catch(function (err) {
+          window.bapStreamInFlight = false;
           aBody.textContent = 'Connection error: ' + err.message;
           aBubble.className = 'message message-system';
           scheduleInitialAnswerRetry(anchor, 5000);
@@ -506,6 +514,7 @@
       var aReasoningDetails = null;
       var reasoningAccumulated = '';
       var chatSearchLimitPending = false;
+      window.bapStreamInFlight = true;
 
       textarea.value = '';
 
@@ -555,11 +564,13 @@
               } catch(_) {}
             } else if (evtName === 'done') {
               bapCloseReasoningIfAuto(aReasoningDetails);
+              window.bapStreamInFlight = false;
               if (!chatSearchLimitPending) {
                 // Replace streaming content with server-rendered markdown
                 var html = await fetch(refreshURL).then(function(r){ return r.text(); });
                 chatMessages.innerHTML = html;
                 bapRenderMath(chatMessages);
+                bapMovePillsIntoMessages(chatMessages);
               }
             } else if (evtName === 'search_limit') {
               bapCloseReasoningIfAuto(aReasoningDetails);
@@ -573,7 +584,6 @@
             } else if (evtName === 'reasoning') {
               try {
                 var rToken = JSON.parse(dataLine);
-                reasoningAccumulated += rToken;
                 if (!aReasoning) {
                   var details = bapMakeReasoningDetails();
                   var pre = document.createElement('pre');
@@ -584,7 +594,7 @@
                   aReasoningDetails = details;
                   bapClearTypingDots(aBody);
                 }
-                aReasoning.textContent = reasoningAccumulated;
+                bapAppendToken(aReasoning, rToken);
                 bapAutoScrollReasoning(aReasoning);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch(_) {}
@@ -594,15 +604,17 @@
               aBubble.className = 'message message-system';
             } else if (dataLine) {
               try {
-                accumulated += JSON.parse(dataLine);
+                var token = JSON.parse(dataLine);
                 bapClearTypingDots(aBody);
-                aBody.textContent = accumulated;
+                bapAppendToken(aBody, token);
+                accumulated += token;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch(_) {}
             }
           }
         }
       } catch (err) {
+        window.bapStreamInFlight = false;
         aBody.textContent = 'Connection error: ' + err.message;
       } finally {
         btn.disabled = false;
@@ -666,6 +678,7 @@
       var reasoningAccumulated = '';
       var searchLimitPending = false;
       var accumulated = '';
+      window.bapStreamInFlight = true;
 
       try {
         var response = await fetch(streamURL, { method: 'POST', body: new FormData() });
@@ -707,10 +720,12 @@
               } catch (_) {}
             } else if (evtName === 'done') {
               bapCloseReasoningIfAuto(aReasoningDetails);
+              window.bapStreamInFlight = false;
               if (!searchLimitPending) {
                 var html = await fetch(refreshURL).then(function (r) { return r.text(); });
                 chatMessages.innerHTML = html;
                 bapRenderMath(chatMessages);
+                bapMovePillsIntoMessages(chatMessages);
               }
             } else if (evtName === 'search_limit') {
               bapCloseReasoningIfAuto(aReasoningDetails);
@@ -724,7 +739,6 @@
             } else if (evtName === 'reasoning') {
               try {
                 var rToken = JSON.parse(dataLine);
-                reasoningAccumulated += rToken;
                 if (!aReasoning) {
                   var details = bapMakeReasoningDetails();
                   var pre = document.createElement('pre');
@@ -734,7 +748,7 @@
                   aReasoning = pre;
                   aReasoningDetails = details;
                 }
-                aReasoning.textContent = reasoningAccumulated;
+                bapAppendToken(aReasoning, rToken);
                 bapAutoScrollReasoning(aReasoning);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch (_) {}
@@ -743,14 +757,17 @@
               aBubble.className = 'message message-system';
             } else if (dataLine) {
               try {
-                accumulated += JSON.parse(dataLine);
-                aBody.textContent = accumulated;
+                var token = JSON.parse(dataLine);
+                bapClearTypingDots(aBody);
+                bapAppendToken(aBody, token);
+                accumulated += token;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
               } catch (_) {}
             }
           }
         }
       } catch (err) {
+        window.bapStreamInFlight = false;
         aBody.textContent = 'Connection error: ' + err.message;
       } finally {
         btn.disabled = false;
@@ -774,31 +791,80 @@
     if (dots) dots.remove();
   }
 
-  // Inserts a search-query pill after the current bubble and appends a new
-  // assistant bubble for the next response cycle. Returns { aBubble, aBody }.
+  // Inserts a search-query pill inside the current bubble and continues in the
+  // same bubble. Returns { aBubble, aBody } pointing to the same bubble.
   function bapHandleSearchQuery(aThread, aBubble, query) {
-    var pill = document.createElement('div');
+    var pill = document.createElement('button');
+    pill.type = 'button';
     pill.className = 'search-query-pill';
+    pill.dataset.queryText = query;
     pill.innerHTML =
       '<span class="search-query-pill-icon">&#128269;</span>' +
       '<span class="search-query-pill-label">Additional research:</span>' +
       '<span class="search-query-pill-text">' + bapEscapeHtml(query) + '</span>';
-    // Insert pill right after the current bubble
-    aThread.insertBefore(pill, aBubble.nextSibling);
+    // Insert pill before message-body (between reasoning and response), not at end
+    var aBody = aBubble.querySelector('.message-body');
+    if (aBody) {
+      aBubble.insertBefore(pill, aBody);
+    } else {
+      aBubble.appendChild(pill);
+    }
 
-    // New assistant bubble for the next generation cycle
-    var newBody = document.createElement('div');
-    newBody.className = 'message-body markdown-body';
-    newBody.appendChild(bapMakeTypingDots());
-    var newBubble = document.createElement('article');
-    newBubble.className = 'message message-assistant';
-    newBubble.innerHTML = '<div class="message-role">assistant</div>';
-    newBubble.appendChild(newBody);
-    aThread.appendChild(newBubble);
-    return { aBubble: newBubble, aBody: newBody };
+    // Reset the message body in the same bubble for the next cycle
+    if (aBody) {
+      aBody.textContent = '';
+      aBody.appendChild(bapMakeTypingDots());
+    }
+    return { aBubble: aBubble, aBody: aBody };
+  }
+
+  // No-op kept for call sites during streaming (pills are handled by bapHandleSearchQuery).
+  function bapMovePillsIntoMessages() {}
+
+  // Delegated click handler for search-query pills — works for both static and streamed pills.
+  document.addEventListener('click', function(e) {
+    var pill = e.target && e.target.closest ? e.target.closest('.search-query-pill[data-query-text]') : null;
+    if (!pill) return;
+    var query = pill.dataset.queryText;
+    var panel = document.getElementById('results-panel');
+    if (!panel) return;
+    var active = pill.classList.contains('search-query-pill--active');
+    document.querySelectorAll('.search-query-pill--active').forEach(function(p) {
+      p.classList.remove('search-query-pill--active');
+    });
+    if (active) {
+      window.bapActiveResultFilter = null;
+      bapApplyResultsLimit(panel);
+      panel.querySelectorAll('.result-card').forEach(function(c) { c.style.display = ''; });
+      var showMore = panel.querySelector('.results-show-more');
+      if (showMore) showMore.style.display = '';
+    } else {
+      window.bapActiveResultFilter = query;
+      pill.classList.add('search-query-pill--active');
+      bapApplyResultFilter(panel, query);
+    }
+  });
+
+  function bapApplyResultFilter(panel, query) {
+    panel.querySelectorAll('.result-card').forEach(function(card) {
+      card.style.display = (card.dataset.queryText === query) ? '' : 'none';
+    });
+    var showMore = panel.querySelector('.results-show-more');
+    if (showMore) showMore.style.display = 'none';
   }
 
   function bapApplyResultsLimit(panel) {
+    if (window.bapActiveResultFilter) {
+      bapApplyResultFilter(panel, window.bapActiveResultFilter);
+      // Re-mark the active pill
+      document.querySelectorAll('.search-query-pill--active').forEach(function(p) {
+        p.classList.remove('search-query-pill--active');
+      });
+      document.querySelectorAll('.search-query-pill[data-query-text]').forEach(function(p) {
+        if (p.dataset.queryText === window.bapActiveResultFilter) p.classList.add('search-query-pill--active');
+      });
+      return;
+    }
     var limit = parseInt(panel.dataset.resultsLimit || '0', 10);
     if (!limit) return;
     var conversationId = panel.dataset.conversationId || '';
@@ -965,7 +1031,7 @@
 <div class="results-grid">
   {{ range $i, $r := .SearchResults }}
   {{ $summary := index $.SummaryLookup $r.URL }}
-  <article class="card result-card{{ if eq $r.QueryVariant "rewritten" }} result-card--rewritten{{ end }}{{ if eq $r.QueryVariant "iterative" }} result-card--iterative{{ end }}" data-variant="{{ $r.QueryVariant }}" data-result-index="{{ $i }}">
+  <article class="card result-card{{ if eq $r.QueryVariant "rewritten" }} result-card--rewritten{{ end }}{{ if eq $r.QueryVariant "iterative" }} result-card--iterative{{ end }}" data-variant="{{ $r.QueryVariant }}" data-query-text="{{ $r.QueryText }}" data-result-index="{{ $i }}">
     <span class="result-status-dot result-status-dot-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}></span>
     <div class="result-card-topline">
       <div class="source-hover" tabindex="0">
@@ -1014,14 +1080,11 @@
 {{ define "chat_messages" }}
 {{ if .Messages }}
 <div class="chat-thread">
+  {{ $pendingPills := slice }}
   {{ range .Messages }}
   {{ if .SkipInDisplay }}{{ else }}
   {{ if isSearchQueryMsg . }}
-  <div class="search-query-pill" title="Additional research performed by the assistant">
-    <span class="search-query-pill-icon">&#128269;</span>
-    <span class="search-query-pill-label">Additional research:</span>
-    <span class="search-query-pill-text">{{ searchQueryText . }}</span>
-  </div>
+  {{ $pendingPills = append $pendingPills (searchQueryText .) }}
   {{ else }}
   <article class="message message-{{ .Role }}" data-message-id="{{ .ID }}" data-message-role="{{ .Role }}">
     <div class="message-head">
@@ -1042,6 +1105,14 @@
       <pre class="reasoning-content">{{ .Reasoning }}</pre>
     </details>
     {{ end }}
+    {{ range $pendingPills }}
+    <button type="button" class="search-query-pill" data-query-text="{{ . }}" title="Click to filter results by this search query">
+      <span class="search-query-pill-icon">&#128269;</span>
+      <span class="search-query-pill-label">Additional research:</span>
+      <span class="search-query-pill-text">{{ . }}</span>
+    </button>
+    {{ end }}
+    {{ $pendingPills = slice }}
     <div class="message-body markdown-body">{{ if eq .Role "assistant" }}{{ markdownWithSources .Content $ }}{{ else }}{{ markdown .Content }}{{ end }}</div>
   </article>
   {{ end }}

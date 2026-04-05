@@ -53,7 +53,7 @@
           data-results-limit="{{ .Conversation.ResultsDisplayLimit }}"
           data-conversation-id="{{ .Conversation.ID }}"
           hx-get="/conversations/{{ .Conversation.ID }}/results"
-          hx-trigger="load, every 5s"
+          hx-trigger="load, every 1s [document.querySelector('#results-panel .results-grid') == null], every 5s [document.querySelector('#results-panel .results-grid') != null]"
           hx-swap="innerHTML"
           hx-on:htmx:after-swap="bapApplyResultsLimit(this)">
           {{ template "search_results" .Conversation }}
@@ -92,7 +92,7 @@
           hx-get="/conversations/{{ .Conversation.ID }}/summaries"
           hx-trigger="load, every 5s [!document.querySelector('#summary-panel .summary-ready-flag')]"
           hx-swap="innerHTML"
-          hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); var capsule = document.getElementById('processing-capsule'); if (capsule) capsule.style.display = done ? 'none' : ''; var st = document.querySelector('#summary-panel .summaries-status'); if (st) { var el; el = document.getElementById('proc-status'); if (el) el.textContent = st.dataset.status || ''; el = document.getElementById('proc-sources'); if (el) el.textContent = st.dataset.sources || ''; el = document.getElementById('proc-rewrite'); if (el) el.textContent = st.dataset.rewrite || ''; el = document.getElementById('proc-query'); if (el) { el.textContent = st.dataset.query || ''; el.closest('.processing-popover-row').style.display = st.dataset.query ? '' : 'none'; } el = document.getElementById('proc-detail'); if (el) { el.textContent = st.dataset.detail || ''; el.style.display = st.dataset.detail ? '' : 'none'; } } if (done) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
+          hx-on::after-settle="(function(){ var done = document.querySelector('#summary-panel .summary-ready-flag'); var capsule = document.getElementById('processing-capsule'); if (capsule) capsule.style.display = done ? 'none' : ''; var st = document.querySelector('#summary-panel .summaries-status'); if (st) { var el; el = document.getElementById('proc-status'); if (el) el.textContent = st.dataset.status || ''; el = document.getElementById('proc-sources'); if (el) el.textContent = st.dataset.sources || ''; el = document.getElementById('proc-rewrite'); if (el) el.textContent = st.dataset.rewrite || ''; el = document.getElementById('proc-query'); if (el) { el.textContent = st.dataset.query || ''; el.closest('.processing-popover-row').style.display = st.dataset.query ? '' : 'none'; } el = document.getElementById('proc-detail'); if (el) { el.textContent = st.dataset.detail || ''; el.style.display = st.dataset.detail ? '' : 'none'; } } if (done && !window.bapStreamInFlight) { htmx.ajax('GET', '/conversations/{{ .Conversation.ID }}/messages', { target: '#chat-messages', swap: 'innerHTML' }); } })()">
           {{ template "summaries" .Conversation }}
         </div>
 

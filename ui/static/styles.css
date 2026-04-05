@@ -1423,7 +1423,7 @@ textarea {
 /* ===== Additional research pill ===== */
 
 .search-query-pill {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
@@ -1432,9 +1432,23 @@ textarea {
   background: rgba(12, 124, 89, 0.06);
   font-size: 0.82rem;
   color: var(--accent-strong);
-  margin: 6px 0;
+  margin: 8px 0 0;
   width: fit-content;
   max-width: 100%;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms, border-color 120ms;
+}
+
+.search-query-pill:hover {
+  background: rgba(12, 124, 89, 0.12);
+  border-color: rgba(12, 124, 89, 0.4);
+}
+
+.search-query-pill--active {
+  background: rgba(12, 124, 89, 0.18);
+  border-color: rgba(12, 124, 89, 0.6);
+  font-weight: 600;
 }
 
 .search-query-pill-icon {

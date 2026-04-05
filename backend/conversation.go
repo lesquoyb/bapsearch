@@ -16,6 +16,7 @@ import (
 )
 
 var needMoreSearchPattern = regexp.MustCompile(`(?is)<<\s*NEED_MORE_SEARCH\s*:(.*?)(?:>>|$)`)
+var thinkBlockPattern = regexp.MustCompile(`(?is)<think>.*?</think>`)
 
 type ConversationService struct {
 	db            *sql.DB
@@ -105,6 +106,29 @@ func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Conversations: conversations,
 		Status:        r.URL.Query().Get("status"),
 	})
+}
+
+// makeBatchedReasoningCallback returns a callback that batches reasoning tokens
+// and only calls writeEvent once the batch reaches minChars characters, reducing
+// the number of SSE events sent to the browser when the LLM generates reasoning
+// content faster than the browser can consume individual tokens.
+// Call flush() after the LLM call to emit any remaining buffered content.
+func makeBatchedReasoningCallback(writeEvent func(string, string), minChars int) (callback func(string), flush func()) {
+	var buf strings.Builder
+	callback = func(token string) {
+		buf.WriteString(token)
+		if buf.Len() >= minChars {
+			writeEvent("reasoning", buf.String())
+			buf.Reset()
+		}
+	}
+	flush = func() {
+		if buf.Len() > 0 {
+			writeEvent("reasoning", buf.String())
+			buf.Reset()
+		}
+	}
+	return callback, flush
 }
 
 func (app *App) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -429,14 +453,17 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 	currentQuery := readyConversation.RewrittenQuery
 	var reply string
 	var reasoningBuf strings.Builder
+	didInlineSearch := false
 
 	for searchLoop < maxSearchLoops {
 		replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
 
+		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
 		reply, err = app.llm.GenerateGroundedSearchAnswerStream(r.Context(), replyMeta, readyConversation.Title, currentQuery, currentSources, func(token string) {
 			reasoningBuf.WriteString(token)
-			writeEvent("reasoning", token)
+			batchedReasoning(token)
 		})
+		flushReasoning()
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("grounded answer generation failed", "error", err)
 			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "error", err.Error())
@@ -450,6 +477,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		}
 
 		searchLoop++
+		didInlineSearch = true
 		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "answer_stream",
@@ -467,11 +495,21 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 			break
 		}
 
+		// Use the top results ranked by the new query for the LLM's next context.
 		currentSources = newSources
 		if app.cfg.SummarizeURLLimit > 0 && len(currentSources) > app.cfg.SummarizeURLLimit {
 			currentSources = currentSources[:app.cfg.SummarizeURLLimit]
 		}
 		currentQuery = newSearchQuery
+	}
+
+	// Re-rank all documents against the original query in the background so that
+	// the persistent DB ranking reflects the conversation's original intent rather
+	// than the last supplemental search query.
+	if didInlineSearch {
+		bgMeta := RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}
+		originalQuery := readyConversation.RewrittenQuery
+		go app.rerankByOriginalQuery(context.Background(), bgMeta, conversationID, originalQuery)
 	}
 
 	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, readyConversation.Title) {
@@ -579,12 +617,15 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 	maxChatSearchLoops := app.maxSearchLoops(r.Context())
 	var reply string
 	var reasoningBuf strings.Builder
+	didInlineSearch := false
 
 	for loop := 0; loop < maxChatSearchLoops; loop++ {
+		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
-			writeEvent("reasoning", token)
+			batchedReasoning(token)
 		})
+		flushReasoning()
 
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat generation failed", "error", err)
@@ -599,6 +640,7 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 			break
 		}
 
+		didInlineSearch = true
 		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_stream",
@@ -609,17 +651,29 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 		writeEvent("search_query", newSearchQuery)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		ranked, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
 		if processErr != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
 			break
 		}
 
-		// Rebuild context with the re-ranked sources
-		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
-		if err != nil {
-			break
+		// Build the LLM context directly from the results ranked by the new query,
+		// so that newly fetched pages surface first and break the search loop.
+		contextText = buildContextFromRanked(ranked, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if contextText == "" {
+			contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+			if err != nil {
+				break
+			}
 		}
+	}
+
+	// Re-rank all documents against the user's original message in the background
+	// so that the persistent DB ranking reflects the conversation turn's intent
+	// rather than the last supplemental search query.
+	if didInlineSearch {
+		bgMeta := RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}
+		go app.rerankByOriginalQuery(context.Background(), bgMeta, conversationID, message)
 	}
 
 	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
@@ -716,12 +770,15 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 	maxChatSearchLoops := app.maxSearchLoops(r.Context())
 	var reply string
 	var reasoningBuf strings.Builder
+	didInlineSearch := false
 
 	for loop := 0; loop < maxChatSearchLoops; loop++ {
+		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
-			writeEvent("reasoning", token)
+			batchedReasoning(token)
 		})
+		flushReasoning()
 
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("stream chat regeneration failed", "error", err)
@@ -736,6 +793,7 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 			break
 		}
 
+		didInlineSearch = true
 		_ = app.conversations.AddSearchQueryMessage(context.Background(), conversationID, newSearchQuery)
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_regenerate_stream",
@@ -746,16 +804,24 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 		writeEvent("search_query", newSearchQuery)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		ranked, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
 		if processErr != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
 			break
 		}
 
-		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
-		if err != nil {
-			break
+		contextText = buildContextFromRanked(ranked, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if contextText == "" {
+			contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+			if err != nil {
+				break
+			}
 		}
+	}
+
+	if didInlineSearch {
+		bgMeta := RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}
+		go app.rerankByOriginalQuery(context.Background(), bgMeta, conversationID, message)
 	}
 
 	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
@@ -857,10 +923,12 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 	maxLoops := app.maxSearchLoops(r.Context())
 
 	for loop := 0; loop < maxLoops; loop++ {
+		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
-			writeEvent("reasoning", token)
+			batchedReasoning(token)
 		})
+		flushReasoning()
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more generation failed", "error", err)
 			writeEvent("error", chatFailureMessage(err))
@@ -969,10 +1037,12 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var reasoningBuf strings.Builder
+	batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
 	reply, err := app.llm.GenerateConversationForceReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 		reasoningBuf.WriteString(token)
-		writeEvent("reasoning", token)
+		batchedReasoning(token)
 	})
+	flushReasoning()
 	if err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("force-answer generation failed", "error", err)
 		writeEvent("error", chatFailureMessage(err))
@@ -994,7 +1064,9 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 }
 
 // detectNeedMoreSearch scans LLM output for the <<NEED_MORE_SEARCH: query>> signal.
+// It ignores any occurrence inside <think>...</think> blocks.
 func detectNeedMoreSearch(text string) string {
+	text = thinkBlockPattern.ReplaceAllString(text, "")
 	matches := needMoreSearchPattern.FindStringSubmatch(text)
 	if len(matches) < 2 {
 		return ""
@@ -1009,9 +1081,10 @@ func detectNeedMoreSearch(text string) string {
 	return ""
 }
 
-// stripNeedMoreSearch removes the <<NEED_MORE_SEARCH: ...>> tag from a reply,
-// returning only the real answer content (if any).
+// stripNeedMoreSearch removes the <<NEED_MORE_SEARCH: ...>> tag and any residual
+// <think>...</think> blocks from a reply, returning only the real answer content.
 func stripNeedMoreSearch(text string) string {
+	text = thinkBlockPattern.ReplaceAllString(text, "")
 	return strings.TrimSpace(needMoreSearchPattern.ReplaceAllString(text, ""))
 }
 
@@ -1146,6 +1219,22 @@ func (app *App) generateIntentEmbedding(ctx context.Context, meta RequestMeta, q
 	return embedding
 }
 
+// rerankByOriginalQuery re-ranks all stored documents in a conversation against
+// the original query embedding. This is meant to be called in a background
+// goroutine after an inline follow-up search has temporarily ranked documents
+// by a supplemental query, so that the persistent DB ranking stays aligned with
+// the conversation's original intent.
+func (app *App) rerankByOriginalQuery(ctx context.Context, meta RequestMeta, conversationID int64, originalQuery string) {
+	embedding, err := app.llm.EmbedText(ctx, meta, originalQuery)
+	if err != nil {
+		app.logger.Error("background rerank: failed to embed original query", "conversationID", conversationID, "error", err)
+		return
+	}
+	if _, err := app.conversations.RerankAllSources(ctx, app.logger, conversationID, embedding); err != nil {
+		app.logger.Error("background rerank: RerankAllSources failed", "conversationID", conversationID, "error", err)
+	}
+}
+
 // inlineSearchAndProcess performs a web search, fetches the result pages,
 // embeds them, stores them, and then re-ranks ALL documents in the conversation
 // by cosine similarity to the given query. It returns the full ranked list.
@@ -1164,6 +1253,7 @@ func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, co
 	// Tag and store the raw search results
 	for i := range searchResp.Results {
 		searchResp.Results[i].QueryVariant = "iterative"
+		searchResp.Results[i].QueryText = query
 	}
 	inserted, err := app.conversations.AppendSearchResults(ctx, conversationID, searchResp.Results, searchResp.EngineStatus)
 	if err != nil {
@@ -1182,17 +1272,20 @@ func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, co
 		inserted = inserted[:limit]
 	}
 
-	// Fetch and extract text from the pages
-	documents := app.fetch.FetchAndExtract(ctx, meta, inserted, func(url, status, detail string) {
+	// Fetch and extract text from the pages, storing source text immediately
+	// as each page arrives so hover cards show content without waiting for all.
+	docCh := app.fetch.FetchAndExtractChan(ctx, meta, inserted, func(url, status, detail string) {
 		app.conversations.UpdateSummaryStatus(ctx, conversationID, url, status, detail)
 	})
 
-	// Embed each document and store it
-	for _, doc := range documents {
+	for doc := range docCh {
 		text := strings.TrimSpace(doc.Text)
 		if text == "" || len([]rune(text)) < 80 {
 			continue
 		}
+
+		// Store source text immediately for hover card visibility.
+		_ = app.conversations.StoreSourceText(ctx, conversationID, doc.URL, text)
 
 		embedding, err := app.llm.EmbedText(ctx, meta, text)
 		if err != nil {
@@ -1203,7 +1296,7 @@ func (app *App) inlineSearchAndProcess(ctx context.Context, meta RequestMeta, co
 			continue
 		}
 
-		_ = app.conversations.StoreDocument(ctx, conversationID, doc.URL, text, string(embeddingJSON))
+		_ = app.conversations.UpdateDocumentEmbedding(ctx, conversationID, doc.URL, string(embeddingJSON))
 	}
 
 	// Determine which embedding to use for ranking
@@ -1269,6 +1362,7 @@ func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request
 	maxChatSearchLoops := app.maxSearchLoops(r.Context())
 	var reply string
 	var reasoning string
+	didInlineSearch := false
 	for loop := 0; loop < maxChatSearchLoops; loop++ {
 		reply, reasoning, err = app.llm.GenerateConversationReply(r.Context(), replyMeta, memorySummary, contextText, history)
 		if err != nil {
@@ -1301,6 +1395,7 @@ func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request
 			break
 		}
 
+		didInlineSearch = true
 		loggerWithMeta(r.Context(), app.logger, conversationID).Info("follow_up_search_requested",
 			"path", "message_post",
 			"loop", loop+1,
@@ -1309,16 +1404,24 @@ func (app *App) handleConversationMessage(w http.ResponseWriter, r *http.Request
 		)
 
 		intentEmb := app.generateIntentEmbedding(r.Context(), replyMeta, newSearchQuery, history)
-		_, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
+		ranked, processErr := app.inlineSearchAndProcess(r.Context(), replyMeta, conversationID, newSearchQuery, intentEmb)
 		if processErr != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("iterative search processing failed", "trigger", trigger, "query", newSearchQuery, "error", processErr)
 			break
 		}
 
-		contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
-		if err != nil {
-			break
+		contextText = buildContextFromRanked(ranked, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+		if contextText == "" {
+			contextText, err = app.conversations.BuildSearchContext(r.Context(), meta.UserID, conversationID, app.cfg.ChatContextChars, app.cfg.ContextDocCount)
+			if err != nil {
+				break
+			}
 		}
+	}
+
+	if didInlineSearch {
+		bgMeta := RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}
+		go app.rerankByOriginalQuery(context.Background(), bgMeta, conversationID, message)
 	}
 
 	if detectNeedMoreSearch(reply) != "" || app.shouldAutoSearchReply(reply, message) {
@@ -1562,9 +1665,9 @@ func (service *ConversationService) StoreSearchResults(ctx context.Context, conv
 
 	for _, result := range results {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, rank)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.Rank); err != nil {
+			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, query_text, rank)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.QueryText, result.Rank); err != nil {
 			return err
 		}
 
@@ -1634,9 +1737,9 @@ func (service *ConversationService) AppendSearchResults(ctx context.Context, con
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, rank)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.Rank); err != nil {
+			INSERT INTO search_results (conversation_id, url, title, snippet, query_variant, query_text, rank)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, conversationID, result.URL, result.Title, result.Snippet, result.QueryVariant, result.QueryText, result.Rank); err != nil {
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -1701,6 +1804,38 @@ func (service *ConversationService) UpdateAnswerStatus(ctx context.Context, conv
 		SET answer_status = ?, answer_detail = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, strings.TrimSpace(status), strings.TrimSpace(detail), conversationID)
+	return err
+}
+
+// StoreSourceText persists extracted page text immediately so hover cards can
+// show content before embedding is computed. Sets status to 'embedding'.
+func (service *ConversationService) StoreSourceText(ctx context.Context, conversationID int64, url, sourceText string) error {
+	_, err := service.db.ExecContext(ctx, `
+		INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
+		VALUES (?, ?, ?, '', 0, 0, 'embedding', '')
+		ON CONFLICT(conversation_id, url) DO UPDATE SET
+			source_text = excluded.source_text,
+			status = 'embedding',
+			status_detail = '',
+			updated_at = CURRENT_TIMESTAMP
+	`, conversationID, url, sourceText)
+	if err != nil {
+		return err
+	}
+	_, err = service.db.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
+	return err
+}
+
+// UpdateDocumentEmbedding stores the embedding and marks the document as ready.
+func (service *ConversationService) UpdateDocumentEmbedding(ctx context.Context, conversationID int64, url, embeddingJSON string) error {
+	_, err := service.db.ExecContext(ctx, `
+		UPDATE summaries SET embedding_json = ?, status = 'ready', status_detail = '', updated_at = CURRENT_TIMESTAMP
+		WHERE conversation_id = ? AND url = ?
+	`, embeddingJSON, conversationID, url)
+	if err != nil {
+		return err
+	}
+	_, err = service.db.ExecContext(ctx, `UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
 	return err
 }
 
@@ -1871,7 +2006,7 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 
 func (service *ConversationService) GetSearchResults(ctx context.Context, conversationID int64) ([]SearchResult, error) {
 	rows, err := service.db.QueryContext(ctx, `
-		SELECT r.url, r.title, r.snippet, r.query_variant, r.rank
+		SELECT r.url, r.title, r.snippet, r.query_variant, r.query_text, r.rank
 		FROM search_results r
 		LEFT JOIN summaries s ON s.conversation_id = r.conversation_id AND s.url = r.url
 		WHERE r.conversation_id = ?
@@ -1889,7 +2024,7 @@ func (service *ConversationService) GetSearchResults(ctx context.Context, conver
 	results := []SearchResult{}
 	for rows.Next() {
 		var item SearchResult
-		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.Rank); err != nil {
+		if err := rows.Scan(&item.URL, &item.Title, &item.Snippet, &item.QueryVariant, &item.QueryText, &item.Rank); err != nil {
 			return nil, err
 		}
 		results = append(results, item)
@@ -2091,6 +2226,45 @@ func (service *ConversationService) GetMessageHistory(ctx context.Context, userI
 		history = append(history, LLMMessage{Role: message.Role, Content: message.Content})
 	}
 	return history, nil
+}
+
+// buildContextFromRanked builds a search context string directly from a ranked
+// source list, bypassing the database. This is used to feed the LLM an
+// immediately up-to-date context after an inline search ranks results by the
+// supplemental query, before the background re-rank restores original ordering.
+func buildContextFromRanked(ranked []RankedSource, maxChars int, maxDocs int) string {
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	if maxDocs <= 0 {
+		maxDocs = 5
+	}
+	builder := strings.Builder{}
+	docIndex := 0
+	for _, source := range ranked {
+		if strings.TrimSpace(source.SourceText) == "" {
+			continue
+		}
+		if docIndex >= maxDocs {
+			break
+		}
+		docIndex++
+		excerpt := compactContextText(source.SourceText, 2500)
+		block := fmt.Sprintf("[%d] URL: %s\nSimilarity: %.4f\n", source.RerankPosition, source.URL, source.SimilarityScore)
+		if excerpt != "" {
+			block += fmt.Sprintf("Extracted text excerpt:\n%s\n", excerpt)
+		}
+		block += "\n"
+		if builder.Len()+len(block) > maxChars {
+			remaining := maxChars - builder.Len()
+			if remaining > 0 {
+				builder.WriteString(block[:remaining])
+			}
+			break
+		}
+		builder.WriteString(block)
+	}
+	return builder.String()
 }
 
 func (service *ConversationService) BuildSearchContext(ctx context.Context, userID string, conversationID int64, maxChars int, maxDocs int) (string, error) {

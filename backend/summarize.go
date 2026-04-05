@@ -117,6 +117,13 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 			searches <- searchBatch{variant: "rewritten", rewrittenQuery: candidate, response: response, err: searchErr}
 		}()
 
+		// Collect all batches, storing raw results immediately as they arrive
+		// so the UI can display them before fetch/embed completes.
+		type insertedBatch struct {
+			inserted []SearchResult
+		}
+		var toProcess []insertedBatch
+
 		for remaining := 0; remaining < 2; remaining++ {
 			batch := <-searches
 			if batch.variant == "rewritten" && strings.TrimSpace(batch.rewrittenQuery) != "" && batch.err == nil && len(batch.response.Results) > 0 {
@@ -136,17 +143,21 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 				batch.response.Results[index].QueryVariant = batch.variant
 			}
 
+			// Store immediately so the UI poll sees raw results right away
 			inserted, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, batch.response.Results, batch.response.EngineStatus)
 			if err != nil {
 				service.failPipeline(jobContext, logger, job.ConversationID, err)
 				return
 			}
 
-			if len(inserted) == 0 {
-				continue
+			if len(inserted) > 0 {
+				toProcess = append(toProcess, insertedBatch{inserted: inserted})
 			}
+		}
 
-			if err := service.processResults(jobContext, meta, logger, job.ConversationID, inserted); err != nil {
+		// Now process (fetch + embed) each batch sequentially
+		for _, b := range toProcess {
+			if err := service.processResults(jobContext, meta, logger, job.ConversationID, b.inserted); err != nil {
 				service.failPipeline(jobContext, logger, job.ConversationID, err)
 				return
 			}
@@ -217,23 +228,32 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 		logger.Error("updating answer status failed", "error", err)
 	}
 
-	documents := service.fetch.FetchAndExtract(ctx, meta, results, func(url, status, detail string) {
+	docCh := service.fetch.FetchAndExtractChan(ctx, meta, results, func(url, status, detail string) {
 		service.updateSummaryStatus(ctx, logger, conversationID, url, status, detail)
 	})
 
-	for _, result := range results {
-		if !containsDocument(documents, result.URL) {
-			service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", "Failed to extract source text.")
-		}
-	}
+	// Track which URLs were fetched to detect failures afterwards.
+	fetched := make(map[string]bool)
 
-	for _, document := range documents {
+	// Process each document as soon as it arrives: store source text immediately
+	// (making hover-card content visible) then compute and store the embedding.
+	for document := range docCh {
+		fetched[document.URL] = true
+
 		if strings.TrimSpace(document.Text) == "" {
 			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", "Ignored because extracted content was empty.")
 			continue
 		}
 		if len([]rune(strings.TrimSpace(document.Text))) < minSummarySourceChars {
 			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", fmt.Sprintf("Ignored because the extracted text was too short (%d characters).", len([]rune(strings.TrimSpace(document.Text)))))
+			continue
+		}
+
+		// Store source text immediately so the hover card can show it while
+		// we wait for the embedding to be computed.
+		if err := service.conversations.StoreSourceText(ctx, conversationID, document.URL, document.Text); err != nil {
+			logger.Error("storing source text failed", "url", document.URL, "error", err)
+			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
 			continue
 		}
 
@@ -252,10 +272,16 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 			continue
 		}
 
-		if err := service.conversations.StoreDocument(ctx, conversationID, document.URL, document.Text, string(embeddingJSON)); err != nil {
-			logger.Error("storing extracted document failed", "url", document.URL, "error", err)
+		if err := service.conversations.UpdateDocumentEmbedding(ctx, conversationID, document.URL, string(embeddingJSON)); err != nil {
+			logger.Error("storing document embedding failed", "url", document.URL, "error", err)
 			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
 			continue
+		}
+	}
+
+	for _, result := range results {
+		if !fetched[result.URL] {
+			service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", "Failed to extract source text.")
 		}
 	}
 

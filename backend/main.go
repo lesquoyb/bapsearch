@@ -205,6 +205,15 @@ func main() {
 		"searchQueryText": func(msg MessageRecord) string {
 			return strings.TrimPrefix(msg.Content, "search_query:")
 		},
+		"slice": func(items ...string) []string {
+			if len(items) == 0 {
+				return []string{}
+			}
+			return items
+		},
+		"append": func(slice []string, item string) []string {
+			return append(slice, item)
+		},
 		"rewriteStatusLabel": func(status string) string {
 			switch strings.TrimSpace(status) {
 			case "running":
@@ -620,6 +629,16 @@ func applySchema(db *sql.DB, schemaPath string) error {
 	}
 	if _, err = db.Exec(string(schema)); err != nil {
 		return err
+	}
+
+	// Additive migrations for columns added after initial schema
+	migrations := []string{
+		`ALTER TABLE search_results ADD COLUMN query_text TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
 	}
 
 	return nil

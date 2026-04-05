@@ -53,7 +53,10 @@ func NewFetchService(logger *slog.Logger, trafilaturaPath string, workerCount, m
 	}
 }
 
-func (service *FetchService) FetchAndExtract(ctx context.Context, meta RequestMeta, results []SearchResult, onStatus func(url, status, detail string)) []PageDocument {
+// FetchAndExtractChan fetches and extracts pages concurrently, yielding each
+// document as soon as it is ready. The returned channel is closed when all
+// workers finish. Callers must drain the channel fully.
+func (service *FetchService) FetchAndExtractChan(ctx context.Context, meta RequestMeta, results []SearchResult, onStatus func(url, status, detail string)) <-chan PageDocument {
 	jobs := make(chan SearchResult)
 	output := make(chan PageDocument, len(results))
 	var workers sync.WaitGroup
@@ -85,8 +88,13 @@ func (service *FetchService) FetchAndExtract(ctx context.Context, meta RequestMe
 		close(output)
 	}()
 
+	return output
+}
+
+func (service *FetchService) FetchAndExtract(ctx context.Context, meta RequestMeta, results []SearchResult, onStatus func(url, status, detail string)) []PageDocument {
+	ch := service.FetchAndExtractChan(ctx, meta, results, onStatus)
 	documents := make([]PageDocument, 0, len(results))
-	for document := range output {
+	for document := range ch {
 		documents = append(documents, document)
 	}
 	sort.Slice(documents, func(i, j int) bool {

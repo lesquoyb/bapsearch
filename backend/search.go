@@ -19,6 +19,7 @@ type SearchResult struct {
 	Snippet      string
 	Rank         int
 	QueryVariant string
+	QueryText    string
 }
 
 type SearchEngineStatus struct {
