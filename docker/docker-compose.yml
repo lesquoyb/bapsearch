@@ -206,7 +206,6 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ../models:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
@@ -236,7 +235,6 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ../models:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
@@ -266,7 +264,6 @@ services:
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
     volumes:
       - ../models:/models
-      - ./llama-entrypoint.sh:/config/llama-entrypoint.sh:ro
     networks:
       - internal
 
