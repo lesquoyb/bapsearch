@@ -26,4 +26,3 @@ outgoing:
   enable_http2: false
 ui:
   static_use_hash: true
-brand: {}
