@@ -26,7 +26,6 @@ type Config struct {
 	Addr                 string
 	SearchURL            string
 	LlamaURL             string
-	RewriteLLMURL        string
 	EmbeddingsURL        string
 	DBPath               string
 	SchemaPath           string
@@ -235,7 +234,6 @@ func main() {
 	conversations := &ConversationService{db: db, logger: logger, summaryTarget: cfg.SummarizeURLLimit}
 	llm := &LLMService{
 		baseURL:           cfg.LlamaURL,
-		rewriteURL:        cfg.RewriteLLMURL,
 		embeddingsURL:     cfg.EmbeddingsURL,
 		client:            &http.Client{Timeout: 10 * time.Minute},
 		logger:            logger,
@@ -566,8 +564,6 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) llamaURLForRole(role string) string {
 	switch normalizeModelRole(role) {
-	case modelRoleRewrite:
-		return app.cfg.RewriteLLMURL
 	case modelRoleEmbeddings:
 		return app.cfg.EmbeddingsURL
 	default:
@@ -595,7 +591,6 @@ func loadConfig() Config {
 		Addr:                 envOrDefault("BAP_ADDR", ":8081"),
 		SearchURL:            envOrDefault("SEARXNG_SEARCH_URL", "http://searxng:8080/search"),
 		LlamaURL:             answerURL,
-		RewriteLLMURL:        envOrDefault("LLAMA_CPP_REWRITE_URL", answerURL),
 		EmbeddingsURL:        envOrDefault("LLAMA_CPP_EMBEDDINGS_URL", "http://llama:8080/v1/embeddings"),
 		DBPath:               envOrDefault("BAP_DB_PATH", "/database/bap-search.db"),
 		SchemaPath:           envOrDefault("BAP_SCHEMA_PATH", "/app/database/schema.sql"),

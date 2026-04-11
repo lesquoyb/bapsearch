@@ -22,7 +22,6 @@ type LLMMessage struct {
 
 type LLMService struct {
 	baseURL           string
-	rewriteURL        string
 	embeddingsURL     string
 	client            *http.Client
 	logger            *slog.Logger
@@ -44,11 +43,6 @@ const (
 )
 
 const (
-	DefaultPromptRewriteSearch = `You rewrite a user query into a stronger web search query.
-Return only one short search string, never an explanation or reasoning.
-Do NOT explain, justify, or output any reasoning, chain-of-thought, or <think> tags.
-Return only the improved search string, nothing else.`
-
 	DefaultPromptGroundedAnswer = `You are bap-search, a grounded web answer engine.
 Answer only from the provided extracted source texts.
 Treat the extracted source texts as the primary evidence, not the short summaries.
@@ -347,30 +341,13 @@ func (service *LLMService) GenerateSearchIntent(ctx context.Context, meta Reques
 	}
 	messages = append(messages, LLMMessage{Role: "user", Content: "Search query: " + query})
 
-	intent, err := service.chatWithURL(ctx, service.rewriteURL, meta, messages, 128)
+	intent, err := service.chatWithURL(ctx, service.baseURL, meta, messages, 128)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(intent), nil
 }
 
-func (service *LLMService) RewriteSearchQuery(ctx context.Context, meta RequestMeta, query string) (string, error) {
-	messages := []LLMMessage{
-		buildSystemMessage(DefaultPromptRewriteSearch),
-		{Role: "user", Content: query},
-	}
-
-	rewritten, err := service.chatWithURL(ctx, service.rewriteURL, meta, messages, 64)
-	if err != nil {
-		return "", err
-	}
-
-	cleaned := sanitizeSearchQuery(rewritten)
-	if cleaned == "" {
-		return "", fmt.Errorf("rewrite model returned an empty query")
-	}
-	return cleaned, nil
-}
 
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
 	text = strings.TrimSpace(text)

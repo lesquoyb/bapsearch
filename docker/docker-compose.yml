@@ -140,8 +140,6 @@ services:
     depends_on:
       llama-answer:
         condition: service_started
-      llama-rewrite:
-        condition: service_started
       llama-embeddings:
         condition: service_started
       searxng:
@@ -159,7 +157,6 @@ services:
       BAP_SESSION_SECRET: ${BAP_SESSION_SECRET:-}
       SEARXNG_SEARCH_URL: http://searxng:8080/search
       LLAMA_CPP_URL: ${LLAMA_CPP_URL:-http://llama-answer:8080/v1/chat/completions}
-      LLAMA_CPP_REWRITE_URL: ${LLAMA_CPP_REWRITE_URL:-http://llama-rewrite:8080/v1/chat/completions}
       LLAMA_CPP_EMBEDDINGS_URL: ${LLAMA_CPP_EMBEDDINGS_URL:-http://llama-embeddings:8080/v1/embeddings}
       BAP_SUMMARIZE_URL_LIMIT: ${BAP_SUMMARIZE_URL_LIMIT:-3}
       BAP_FETCH_WORKERS: ${BAP_FETCH_WORKERS:-3}
@@ -201,35 +198,6 @@ services:
       LLAMA_MAIN_GPU: ${LLAMA_ANSWER_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_ANSWER_FLASH_ATTN:-false}
       LLAMA_EXTRA_ARGS: ${LLAMA_ANSWER_EXTRA_ARGS:---mlock}
-      MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
-      LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
-    entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]
-    volumes:
-      - ../models:/models
-    networks:
-      - internal
-
-  llama-rewrite:
-    build:
-      context: .
-      dockerfile: llama.Dockerfile
-      args:
-        LLAMA_IMAGE: ${LLAMA_REWRITE_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
-    restart: always
-    cap_add:
-      - IPC_LOCK
-    environment:
-      MODEL_DIR: /models
-      CURRENT_MODEL_FILE: /models/current-rewrite-model.txt
-      LLAMA_HOST: 0.0.0.0
-      LLAMA_PORT: 8080
-      LLAMA_CTX_SIZE: ${LLAMA_REWRITE_CTX_SIZE:-2048}
-      LLAMA_THREADS: ${LLAMA_REWRITE_THREADS:-4}
-      LLAMA_PARALLEL: ${LLAMA_REWRITE_PARALLEL:-1}
-      LLAMA_N_GPU_LAYERS: ${LLAMA_REWRITE_N_GPU_LAYERS:-0}
-      LLAMA_MAIN_GPU: ${LLAMA_REWRITE_MAIN_GPU:-0}
-      LLAMA_FLASH_ATTN: ${LLAMA_REWRITE_FLASH_ATTN:-false}
-      LLAMA_EXTRA_ARGS: ${LLAMA_REWRITE_EXTRA_ARGS:---mlock}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]

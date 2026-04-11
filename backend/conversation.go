@@ -1152,33 +1152,11 @@ func (app *App) resolveFollowUpSearchQuery(ctx context.Context, meta RequestMeta
 // query when no explicit tags are present.
 func (app *App) resolveFollowUpSearchQueries(ctx context.Context, meta RequestMeta, userRequest, reply string) ([]string, string) {
 	if explicits := detectAllNeedMoreSearch(reply); len(explicits) > 0 {
-		type result struct {
-			index int
-			query string
-		}
-		ch := make(chan result, len(explicits))
-		for i, q := range explicits {
-			go func(idx int, raw string) {
-				if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, raw); err == nil && strings.TrimSpace(rewritten) != "" {
-					ch <- result{idx, strings.TrimSpace(rewritten)}
-				} else {
-					ch <- result{idx, raw}
-				}
-			}(i, q)
-		}
-		rewritten := make([]string, len(explicits))
-		for range explicits {
-			r := <-ch
-			rewritten[r.index] = r.query
-		}
-		return rewritten, "model_need_more_search"
+		return explicits, "model_need_more_search"
 	}
 	trigger := followUpSearchTrigger(userRequest, reply)
 	if trigger == "" {
 		return nil, ""
-	}
-	if rewritten, err := app.llm.RewriteSearchQuery(ctx, meta, userRequest); err == nil && strings.TrimSpace(rewritten) != "" {
-		return []string{rewritten}, trigger + ":rewrite_model"
 	}
 	if cleaned := sanitizeSearchQuery(userRequest); cleaned != "" {
 		return []string{cleaned}, trigger + ":sanitized_user_request"

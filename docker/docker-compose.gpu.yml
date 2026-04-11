@@ -2,8 +2,5 @@ services:
   llama-answer:
     gpus: "${LLAMA_ANSWER_GPUS:-all}"
 
-  llama-rewrite:
-    gpus: "${LLAMA_REWRITE_GPUS:-all}"
-
   llama-embeddings:
     gpus: "${LLAMA_EMBEDDINGS_GPUS:-all}"
