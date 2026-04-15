@@ -976,6 +976,168 @@
       }
     });
   }
+  // Client-side mirror of backend/conversation.go sortResultsByStatus.
+  function bapSortResultsByStatus(panel) {
+    var grid = panel.querySelector('.results-grid');
+    if (!grid) return;
+    function priority(card) {
+      var dot = card.querySelector('.result-status-dot');
+      if (!dot) return 1;
+      var cls = dot.className || '';
+      if (/result-status-dot-(fetching|cleaning|embedding|extracting)/.test(cls)) return 0;
+      if (/result-status-dot-error/.test(cls)) return 3;
+      if (/result-status-dot-skipped/.test(cls)) return 2;
+      return 1;
+    }
+    var cards = Array.prototype.slice.call(grid.querySelectorAll('.result-card'));
+    // Stable sort: decorate with original index.
+    cards.forEach(function(c, i) { c._bapIdx = i; });
+    cards.sort(function(a, b) {
+      var pa = priority(a), pb = priority(b);
+      if (pa !== pb) return pa - pb;
+      return a._bapIdx - b._bapIdx;
+    });
+    cards.forEach(function(c) { grid.appendChild(c); });
+  }
+
+  // ── SSE: real-time card / pipeline updates ────────────────────────────────
+  function bapInitConversationEvents(body) {
+    var eventsUrl = body.dataset.eventsUrl;
+    if (!eventsUrl) return;
+    if (body.dataset.done === 'true') return; // already complete on page load
+
+    var es = new EventSource(eventsUrl);
+
+    es.addEventListener('results', function() {
+      // New search results arrived — reload the results panel.
+      var panel = document.getElementById('results-panel');
+      if (!panel) return;
+      bapSaveHoveredResult(panel);
+      var url = body.dataset.resultsUrl;
+      fetch(url).then(function(r) { return r.text(); }).then(function(html) {
+        panel.innerHTML = html;
+        bapApplyResultsLimit(panel);
+        bapRestoreHoveredResult(panel);
+      });
+    });
+
+    es.addEventListener('card', function(e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch(_) { return; }
+      var url = data.url;
+      if (!url) return;
+
+      var panel = document.getElementById('results-panel');
+      if (!panel) return;
+
+      var card = panel.querySelector('[data-url="' + CSS.escape(url) + '"]');
+      if (!card) return;
+
+      // Update status dot
+      if (data.status) {
+        var dot = card.querySelector('.result-status-dot');
+        if (dot) {
+          dot.className = 'result-status-dot result-status-dot-' + data.status;
+          if (data.detail) dot.title = data.detail;
+        }
+        bapSortResultsByStatus(panel);
+        bapApplyResultsLimit(panel);
+      }
+
+      var popover = card.querySelector('.source-summary-popover');
+      if (!popover) return;
+
+      // Update similarity score
+      if (data.similarity_score && data.similarity_score > 0) {
+        var scoreEl = popover.querySelector('.summary-similarity-score');
+        if (!scoreEl) {
+          scoreEl = document.createElement('p');
+          scoreEl.className = 'summary-status-detail summary-similarity-score';
+          popover.insertBefore(scoreEl, popover.firstChild);
+        }
+        scoreEl.textContent = 'Similarity: ' + data.similarity_score.toFixed(4);
+      }
+
+      // Update status detail
+      if (data.detail) {
+        var detailEl = popover.querySelector('.summary-status-detail-msg');
+        if (!detailEl) {
+          detailEl = document.createElement('p');
+          detailEl.className = 'summary-status-detail muted summary-status-detail-msg';
+          var scoreEl2 = popover.querySelector('.summary-similarity-score');
+          if (scoreEl2) {
+            popover.insertBefore(detailEl, scoreEl2.nextSibling);
+          } else {
+            popover.insertBefore(detailEl, popover.firstChild);
+          }
+        }
+        detailEl.textContent = data.detail;
+      }
+
+      // Update source text excerpt
+      if (data.source_text) {
+        var excerptEl = popover.querySelector('.summary-source-excerpt');
+        if (!excerptEl) {
+          excerptEl = document.createElement('p');
+          excerptEl.className = 'summary-source-excerpt';
+          popover.appendChild(excerptEl);
+        }
+        excerptEl.classList.remove('muted');
+        var text = data.source_text;
+        if (text.length > 400) text = text.slice(0, 400) + '…';
+        excerptEl.textContent = text;
+      }
+    });
+
+    es.addEventListener('pipeline', function(e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch(_) { return; }
+
+      var statusEl = document.getElementById('proc-status');
+      if (statusEl) statusEl.textContent = data.status || '';
+
+      var sourcesEl = document.getElementById('proc-sources');
+      if (sourcesEl) sourcesEl.textContent = (data.ready_count || 0) + '/' + (data.target || 0);
+
+      var detailEl = document.getElementById('proc-detail');
+      if (detailEl) {
+        detailEl.textContent = data.detail || '';
+        detailEl.style.display = data.detail ? '' : 'none';
+      }
+    });
+
+    es.addEventListener('close', function() {
+      es.close();
+      body.dataset.done = 'true';
+
+      // Hide the processing capsule
+      var capsule = document.getElementById('processing-capsule');
+      if (capsule) capsule.style.display = 'none';
+
+      // Reload messages if no stream is in flight
+      if (!window.bapStreamInFlight) {
+        var messagesUrl = body.dataset.messagesUrl;
+        var chatMessages = document.getElementById('chat-messages');
+        if (messagesUrl && chatMessages) {
+          fetch(messagesUrl).then(function(r) { return r.text(); }).then(function(html) {
+            chatMessages.innerHTML = html;
+            bapRenderMath(chatMessages);
+          });
+        }
+      }
+    });
+
+    es.onerror = function() {
+      // Reconnect is automatic with EventSource; just log.
+      console.warn('[bapsearch] SSE connection error, browser will retry');
+    };
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var body = document.getElementById('conversation-body');
+    if (body) bapInitConversationEvents(body);
+  });
+
   // Remove the pinned class when the user moves the mouse away.
   document.addEventListener('mouseleave', function(e) {
     var hover = e.target && e.target.closest ? e.target.closest('.source-hover--pinned') : null;
@@ -1028,7 +1190,12 @@
 
     document.addEventListener('DOMContentLoaded', function () {
       pollLlamaStatus();
-      setInterval(pollLlamaStatus, 5000);
+      setInterval(function () {
+        if (document.visibilityState === 'visible') pollLlamaStatus();
+      }, 30000);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') pollLlamaStatus();
+      });
     });
   })();
 
@@ -1138,7 +1305,7 @@
 <div class="results-grid">
   {{ range $i, $r := .SearchResults }}
   {{ $summary := index $.SummaryLookup $r.URL }}
-  <article class="card result-card{{ if eq $r.QueryVariant "rewritten" }} result-card--rewritten{{ end }}{{ if eq $r.QueryVariant "iterative" }} result-card--iterative{{ end }}" data-variant="{{ $r.QueryVariant }}" data-query-text="{{ $r.QueryText }}" data-result-index="{{ $i }}">
+  <article class="card result-card{{ if eq $r.QueryVariant "rewritten" }} result-card--rewritten{{ end }}{{ if eq $r.QueryVariant "iterative" }} result-card--iterative{{ end }}" data-variant="{{ $r.QueryVariant }}" data-query-text="{{ $r.QueryText }}" data-result-index="{{ $i }}" data-url="{{ $r.URL }}">
     <span class="result-status-dot result-status-dot-{{ if $summary.Status }}{{ $summary.Status }}{{ else }}pending{{ end }}" {{ if $summary.Detail }}title="{{ $summary.Detail }}"{{ end }}></span>
     <div class="result-card-topline">
       <div class="source-hover" tabindex="0">

@@ -216,6 +216,8 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleSearchMoreStream(w, r, conversationID)
 	case len(parts) == 3 && parts[1] == "force-answer" && parts[2] == "stream" && r.Method == http.MethodPost:
 		app.handleForceAnswerStream(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet:
+		app.handleConversationEvents(w, r, conversationID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -558,6 +560,7 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+	app.events.Publish(conversationID, "close", struct{}{})
 }
 
 func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -721,6 +724,7 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 	}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+	app.events.Publish(conversationID, "close", struct{}{})
 }
 
 func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter, r *http.Request, conversationID, assistantMessageID int64) {
@@ -875,6 +879,7 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 	}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+	app.events.Publish(conversationID, "close", struct{}{})
 }
 
 func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -1011,6 +1016,7 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+	app.events.Publish(conversationID, "close", struct{}{})
 }
 
 func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -1079,6 +1085,7 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 	go app.memory.MaybeRefreshUserMemory(RequestMeta{RequestID: newRequestID(), UserID: meta.UserID, ConversationID: conversationID}, meta.UserID, conversationID)
 
 	writeEvent("done", "")
+	app.events.Publish(conversationID, "close", struct{}{})
 }
 
 // detectNeedMoreSearch scans LLM output for the first <<NEED_MORE_SEARCH: query>> signal.
@@ -1996,6 +2003,14 @@ func (service *ConversationService) UpdateSummaryStatus(ctx context.Context, con
 	return err
 }
 
+func (service *ConversationService) CountReadySummaries(ctx context.Context, conversationID int64) (int, error) {
+	var count int
+	err := service.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM summaries WHERE conversation_id = ? AND status = 'ready'
+	`, conversationID).Scan(&count)
+	return count, err
+}
+
 func (service *ConversationService) UpdateSummarySource(ctx context.Context, conversationID int64, url, sourceText string) error {
 	_, err := service.db.ExecContext(ctx, `
 		INSERT INTO summaries (conversation_id, url, source_text, embedding_json, similarity_score, rerank_position, status, status_detail)
@@ -2599,4 +2614,71 @@ func (service *ConversationService) BuildTranscript(ctx context.Context, convers
 		parts = append(parts, fmt.Sprintf("%s: %s", message.Role, message.Content))
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func (app *App) handleConversationEvents(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	meta := requestMetaFromContext(r.Context())
+	ctx := r.Context()
+
+	// Send current state immediately so the client is in sync.
+	conversation, err := app.conversations.GetConversationView(ctx, meta.UserID, conversationID)
+	if err == nil {
+		// Pipeline status
+		pipelineData, _ := json.Marshal(PipelineEvent{
+			Status:     conversation.AnswerStatus,
+			Detail:     conversation.AnswerDetail,
+			ReadyCount: conversation.ReadySummaryCount,
+			Target:     conversation.SummaryTarget,
+		})
+		fmt.Fprintf(w, "event: pipeline\ndata: %s\n\n", pipelineData)
+
+		// Card states
+		for _, summary := range conversation.Summaries {
+			cardData, _ := json.Marshal(CardEvent{
+				URL:             summary.URL,
+				Status:          summary.Status,
+				Detail:          summary.Detail,
+				SourceText:      summary.SourceText,
+				SimilarityScore: summary.SimilarityScore,
+			})
+			fmt.Fprintf(w, "event: card\ndata: %s\n\n", cardData)
+		}
+
+		// If already done, send close and return.
+		if conversation.OverviewSummary != "" {
+			fmt.Fprintf(w, "event: close\ndata: {}\n\n")
+			flusher.Flush()
+			return
+		}
+	}
+	flusher.Flush()
+
+	ch := app.events.Subscribe(conversationID)
+	defer app.events.Unsubscribe(conversationID, ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Name, evt.Data)
+			flusher.Flush()
+			if evt.Name == "close" {
+				return
+			}
+		}
+	}
 }

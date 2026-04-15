@@ -42,6 +42,7 @@ type SummarizeService struct {
 	logger              *slog.Logger
 	urlLimit            int
 	queryReformulations int
+	events              *EventBroker
 }
 
 func (service *SummarizeService) StartWorkers(jobs <-chan SummaryJob, workerCount int) {
@@ -64,6 +65,7 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "searching", "Searching the web."); err != nil {
 		logger.Error("updating answer status failed", "error", err)
 	}
+	service.publishPipeline(jobContext, job.ConversationID, "searching", "Searching the web.")
 
 	query := strings.TrimSpace(job.Query)
 	processedAny := false
@@ -142,6 +144,9 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 			return
 		}
 
+		// Notify the frontend that new search results are available.
+		service.events.Publish(job.ConversationID, "results", struct{}{})
+
 		if len(inserted) > 0 {
 			if err := service.processResults(jobContext, meta, logger, job.ConversationID, inserted); err != nil {
 				service.failPipeline(jobContext, logger, job.ConversationID, err)
@@ -163,6 +168,7 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings."); err != nil {
 		logger.Error("updating answer status failed", "error", err)
 	}
+	service.publishPipeline(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings.")
 
 	// Build the embedding text: repeat the original query N times (where N is
 	// the number of reformulations) then append each reformulation. This gives
@@ -203,10 +209,19 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 		readyCount = len(rankedSources)
 	}
 
+	// Publish similarity scores for all ranked cards.
+	for _, src := range rankedSources {
+		service.events.Publish(job.ConversationID, "card", CardEvent{
+			URL:             src.URL,
+			SimilarityScore: src.SimilarityScore,
+		})
+	}
+
 	detail := fmt.Sprintf("Ready to stream an answer from the top %d ranked sources.", readyCount)
 	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "ready", detail); err != nil {
 		logger.Error("updating answer status failed", "error", err)
 	}
+	service.publishPipeline(jobContext, job.ConversationID, "ready", detail)
 
 	logger.Info("pipeline_job_finished", "ranked_sources", len(rankedSources), "query", query)
 }
@@ -261,6 +276,8 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
 			continue
 		}
+		// Push source text to connected clients immediately.
+		service.events.Publish(conversationID, "card", CardEvent{URL: document.URL, SourceText: document.Text})
 
 		service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "embedding", "Generating document embeddings.")
 		embedding, err := service.llm.EmbedText(ctx, meta, document.Text)
@@ -328,12 +345,24 @@ func (service *SummarizeService) failPipeline(ctx context.Context, logger *slog.
 	if statusErr := service.conversations.UpdateAnswerStatus(ctx, conversationID, "error", err.Error()); statusErr != nil {
 		logger.Error("updating failed pipeline status", "error", statusErr)
 	}
+	service.publishPipeline(ctx, conversationID, "error", err.Error())
 }
 
 func (service *SummarizeService) updateSummaryStatus(ctx context.Context, logger *slog.Logger, conversationID int64, url, status, detail string) {
 	if err := service.conversations.UpdateSummaryStatus(ctx, conversationID, url, status, detail); err != nil {
 		logger.Error("updating summary status failed", "url", url, "status", status, "error", err)
 	}
+	service.events.Publish(conversationID, "card", CardEvent{URL: url, Status: status, Detail: detail})
+}
+
+func (service *SummarizeService) publishPipeline(ctx context.Context, conversationID int64, status, detail string) {
+	readyCount, _ := service.conversations.CountReadySummaries(ctx, conversationID)
+	service.events.Publish(conversationID, "pipeline", PipelineEvent{
+		Status:     status,
+		Detail:     detail,
+		ReadyCount: readyCount,
+		Target:     service.urlLimit,
+	})
 }
 
 
