@@ -20,13 +20,22 @@ Behavior: ensures the authenticated user exists, creates a conversation, stores 
 
 Conversation view. Returns raw search results, summaries panel, and chat thread.
 
+### GET /conversations/{id}/events
+
+SSE stream for real-time pipeline and card status updates. Sends current state immediately on connect, then pushes incremental events as the pipeline progresses. Event types:
+
+- `pipeline` — overall status (`status`, `detail`, `ready_count`, `target`)
+- `card` — per-URL status, detail, source text, and similarity score
+- `results` — signals that new search results were stored (client should refresh results panel)
+- `close` — pipeline complete; client should reload the messages panel
+
 ### GET /conversations/{id}/results
 
-HTMX partial for the raw results block. Can be polled while background work runs.
+Partial for the raw results block. Loaded once on page load; subsequent updates are driven by SSE events.
 
 ### GET /conversations/{id}/summaries
 
-HTMX partial for the summaries panel. Returns the current state of all summary jobs.
+Returns the current state of all summary jobs. Used for initial render only.
 
 ### POST /conversations/{id}/summaries/regenerate
 
@@ -142,7 +151,7 @@ Returns a JSON status object for the specified llama.cpp service.
 
 Query parameter:
 
-- `role`: `answer`, `rewrite`, or `embeddings`
+- `role`: `answer` or `embeddings`
 
 Response fields:
 

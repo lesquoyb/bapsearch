@@ -21,28 +21,27 @@
 - Internal-only metasearch engine.
 - No public port published by Compose.
 
-### llama-answer, llama-rewrite, llama-embeddings
+### llama-answer, llama-embeddings
 
-Three dedicated llama.cpp server containers, one per role.
+Two dedicated llama.cpp server containers, one per role.
 
-- `llama-answer`: streams grounded answers and drives the main chat pipeline.
-- `llama-rewrite`: rewrites search queries to improve SearXNG results.
+- `llama-answer`: streams grounded answers, drives the main chat pipeline, and optionally generates query reformulations.
 - `llama-embeddings`: generates document and query embeddings for reranking.
 
-Each container watches its role-specific model file (`current-model.txt`, `current-rewrite-model.txt`, `current-embedding-model.txt`) and reloads the inference process when the file changes.
+Each container watches its role-specific model file (`current-model.txt`, `current-embedding-model.txt`) and reloads the inference process when the file changes.
 
 ## Search workflow
 
 1. User submits a query to `POST /search`.
 2. Backend creates a conversation thread and stores the initial user message.
-3. Backend fires the original query to SearXNG immediately.
-4. In parallel, a rewrite model produces a stronger search query.
-5. The rewritten query is also sent to SearXNG and the two result sets are merged into raw results.
-6. Each newly stored URL is fetched and cleaned with `trafilatura` as soon as it is added.
-7. Extracted texts are embedded and persisted.
-8. The backend reranks sources by cosine similarity against the rewritten-query embedding.
+3. Backend fires the original query to SearXNG. If `BAP_QUERY_REFORMULATIONS > 0`, the answer model also generates N alternative phrasings and each is searched in parallel.
+4. All result sets are merged (deduped by URL) and stored.
+5. The frontend connects to the SSE endpoint (`GET /conversations/{id}/events`) and receives real-time card and pipeline status updates.
+6. Each newly stored URL is fetched and cleaned with `trafilatura`. On failure, the search snippet is used as fallback.
+7. Extracted texts are embedded and persisted; the SSE stream delivers source text to the UI immediately.
+8. The backend reranks sources by cosine similarity against a composite query embedding.
 9. A final answer model streams a grounded answer from the top reranked sources and cites them.
-10. HTMX refreshes the result and pipeline blocks while the initial answer stream is rendered in real time.
+10. On completion, the SSE stream sends a `close` event and the UI reloads the messages panel.
 
 ## Conversation flow
 
@@ -71,6 +70,7 @@ Each container watches its role-specific model file (`current-model.txt`, `curre
 - [backend/memory.go](../backend/memory.go): persistent memory refresh
 - [backend/logging.go](../backend/logging.go): JSON logging and request context
 - [backend/llm.go](../backend/llm.go): llama.cpp chat integration
+- [backend/events.go](../backend/events.go): SSE event broker (pub/sub per conversation)
 - [backend/models.go](../backend/models.go): model discovery, role assignment helpers, and download
 
 ## Database schema

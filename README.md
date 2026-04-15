@@ -6,7 +6,7 @@ Self-hosted conversational search engine for small machines. Combines SearXNG me
 
 - Runs SearXNG internally on an isolated Docker network.
 - Returns raw search results immediately while the pipeline works in the background.
-- Rewrites the user query with a small LLM and runs both the original and rewritten queries against SearXNG in parallel.
+- Optionally generates N query reformulations with the answer model (`BAP_QUERY_REFORMULATIONS`) and runs all variants against SearXNG in parallel, then merges and deduplicates results.
 - Fetches each result page, extracts clean text with trafilatura, generates embeddings, and reranks sources by cosine similarity.
 - Streams a grounded answer from the top-ranked sources with inline citations.
 - Supports iterative search: the model can request additional searches when it needs more information, with user confirmation.
@@ -22,7 +22,7 @@ Self-hosted conversational search engine for small machines. Combines SearXNG me
 |---|---|
 | Go 1.25 backend | API, search pipeline, streaming, SQLite |
 | SQLite | Conversations, users, settings, memory |
-| llama.cpp (×3 containers) | Answer, query rewrite, embeddings |
+| llama.cpp (×2 containers) | Answer, embeddings |
 | SearXNG | Internal metasearch engine |
 | trafilatura | Web page text extraction |
 | HTMX + vanilla JS | Lightweight frontend |
@@ -64,27 +64,27 @@ This uses `ghcr.io/ggml-org/llama.cpp:server-cuda` with full GPU layer offload.
 
 1. User submits a query.
 2. Backend creates a conversation and enqueues a background job.
-3. The original query goes to SearXNG. A rewrite model produces an optimized search query in parallel.
-4. Both result sets are merged and displayed as raw results.
-5. Top URLs are fetched concurrently (`BAP_FETCH_WORKERS`), cleaned with trafilatura, and embedded.
-6. Sources are reranked by cosine similarity against the rewritten-query embedding.
-7. The answer model streams a grounded response with citations from the top sources.
-8. If the model signals it needs more data (`NEED_MORE_SEARCH`), the user is prompted to continue searching or answer with what's available.
-9. User memory is refreshed in the background after each conversation.
+3. The original query goes to SearXNG. If `BAP_QUERY_REFORMULATIONS > 0`, the answer model generates alternative phrasings and each is searched in parallel.
+4. All result sets are merged (deduped by URL) and displayed as raw results.
+5. The browser connects to the SSE event stream (`/conversations/{id}/events`) and receives real-time status updates for each card and the overall pipeline.
+6. Top URLs are fetched concurrently (`BAP_FETCH_WORKERS`), cleaned with trafilatura (snippet fallback on failure), and embedded.
+7. Sources are reranked by cosine similarity against a composite query embedding.
+8. The answer model streams a grounded response with citations from the top sources.
+9. If the model signals it needs more data (`NEED_MORE_SEARCH`), the user is prompted to continue searching or answer with what's available.
+10. User memory is refreshed in the background after each conversation.
 
 ## Multi-model architecture
 
-Three dedicated llama.cpp services run in parallel, each watching its own model file:
+Two dedicated llama.cpp services run in parallel, each watching its own model file:
 
 | Service | Env var | Model file |
 |---|---|---|
 | `llama-answer` | `LLAMA_CPP_URL` | `models/current-model.txt` |
-| `llama-rewrite` | `LLAMA_CPP_REWRITE_URL` | `models/current-rewrite-model.txt` |
 | `llama-embeddings` | `LLAMA_CPP_EMBEDDINGS_URL` | `models/current-embedding-model.txt` |
 
 Model assignments are managed from the settings page. Each file contains the filename of the `.gguf` to load. If a file is missing, the service falls back to the first `.gguf` found in `models/`.
 
-The backend truncates document text before embedding using `BAP_MAX_EMBEDDING_CHARS` to avoid exceeding llama.cpp batch limits.
+The backend truncates document text before embedding using token-count-based truncation (`BAP_MAX_EMBEDDING_TOKENS`) to avoid exceeding the llama.cpp batch limit.
 
 ## Authentication
 
@@ -151,7 +151,8 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_SUMMARIZE_URL_LIMIT` | `3` | URLs to fetch & summarize per search |
 | `BAP_FETCH_WORKERS` | `3` | Concurrent page fetch workers |
 | `BAP_MAX_EXTRACT_CHARS` | `12000` | Max chars extracted per page |
-| `BAP_MAX_EMBEDDING_CHARS` | `1800` | Max chars sent to embedding model |
+| `BAP_MAX_EMBEDDING_TOKENS` | `500` | Max tokens sent to embedding model |
+| `BAP_QUERY_REFORMULATIONS` | `0` | Number of query reformulations to generate (0 = disabled) |
 | `BAP_CHAT_CONTEXT_CHARS` | `4200` | Conversation context for follow-ups |
 | `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
 | `BAP_SUMMARY_WORKERS` | `1` | Concurrent summary pipeline workers |
@@ -159,8 +160,7 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |
 | `BAP_LLM_CONTEXT_TOKENS` | `8192` | LLM context window size |
 | `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
-| `LLAMA_CPP_REWRITE_URL` | (same as answer) | Rewrite model endpoint |
-| `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama:8080/v1/embeddings` | Embedding model endpoint |
+| `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama-embeddings:8080/v1/embeddings` | Embedding model endpoint |
 
 ### UI settings
 
@@ -181,8 +181,8 @@ All of these are adjustable from the `/settings` page without restart:
 | `GET` | `/` | Search landing page |
 | `POST` | `/search` | Create conversation and run search |
 | `GET` | `/conversations/{id}` | Conversation view |
-| `GET` | `/conversations/{id}/results` | HTMX raw results refresh |
-| `GET` | `/conversations/{id}/summaries` | HTMX summary refresh |
+| `GET` | `/conversations/{id}/events` | SSE pipeline and card status stream |
+| `GET` | `/conversations/{id}/results` | Raw results partial |
 | `GET` | `/conversations/{id}/answer/stream` | SSE initial answer stream |
 | `POST` | `/conversations/{id}/messages` | Follow-up chat message |
 | `POST` | `/conversations/{id}/messages/stream` | SSE chat reply stream |
