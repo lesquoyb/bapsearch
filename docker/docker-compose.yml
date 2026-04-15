@@ -133,6 +133,7 @@ services:
       - internal
 
   backend:
+    container_name: ${BACKEND_CONTAINER_NAME:-bapsearch-backend}
     build:
       context: ..
       dockerfile: docker/backend.Dockerfile
@@ -179,6 +180,7 @@ services:
       - proxy
 
   llama-answer:
+    container_name: ${LLAMA_ANSWER_CONTAINER_NAME:-bapsearch-llama-answer}
     build:
       context: .
       dockerfile: llama.Dockerfile
@@ -208,6 +210,7 @@ services:
       - internal
 
   llama-embeddings:
+    container_name: ${LLAMA_EMBEDDINGS_CONTAINER_NAME:-bapsearch-llama-embeddings}
     build:
       context: .
       dockerfile: llama.Dockerfile
@@ -237,6 +240,7 @@ services:
       - internal
 
   searxng:
+    container_name: ${SEARXNG_CONTAINER_NAME:-bapsearch-searxng}
     build:
       context: .
       dockerfile: searxng.Dockerfile
