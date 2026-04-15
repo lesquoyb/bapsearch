@@ -886,6 +886,40 @@
     panel.appendChild(btn);
   }
 
+  // Track which result card's popover is open so it can be restored after htmx swaps.
+  window._bapHoveredUrl = null;
+  function bapSaveHoveredResult(panel) {
+    var pinned = panel.querySelector('.source-hover--pinned');
+    if (pinned) {
+      // Already pinned from a previous swap — keep the same URL.
+      return;
+    }
+    var hovered = panel.querySelector('.source-hover:hover');
+    if (!hovered) { window._bapHoveredUrl = null; return; }
+    var card = hovered.closest('.result-card');
+    var a = card && card.querySelector('a[href]');
+    window._bapHoveredUrl = a ? a.href : null;
+  }
+  function bapRestoreHoveredResult(panel) {
+    if (!window._bapHoveredUrl) return;
+    panel.querySelectorAll('.result-card').forEach(function(card) {
+      var a = card.querySelector('a[href]');
+      var hover = card.querySelector('.source-hover');
+      if (!hover) return;
+      if (a && a.href === window._bapHoveredUrl) {
+        hover.classList.add('source-hover--pinned');
+      }
+    });
+  }
+  // Remove the pinned class when the user moves the mouse away.
+  document.addEventListener('mouseleave', function(e) {
+    var hover = e.target && e.target.closest ? e.target.closest('.source-hover--pinned') : null;
+    if (hover) {
+      hover.classList.remove('source-hover--pinned');
+      window._bapHoveredUrl = null;
+    }
+  }, true);
+
   (function () {
     var ROLE_LABELS = { answer: 'Answer', embeddings: 'Embeddings' };
     var STATUS_LABELS = { loaded: 'ready', loading: 'loading', error: 'error', unknown: 'checking' };
@@ -1041,8 +1075,13 @@
           {{ if gt $summary.SimilarityScore 0.0 }}
           <p class="summary-status-detail">Similarity: {{ printf "%.4f" $summary.SimilarityScore }}</p>
           {{ end }}
+          {{ if $summary.Detail }}
+          <p class="summary-status-detail muted">{{ $summary.Detail }}</p>
+          {{ end }}
           {{ if $summary.SourceText }}
           <p class="summary-source-excerpt">{{ truncate $summary.SourceText 400 }}</p>
+          {{ else if $r.Snippet }}
+          <p class="summary-source-excerpt muted">{{ truncate $r.Snippet 400 }}</p>
           {{ end }}
         </div>
       </div>

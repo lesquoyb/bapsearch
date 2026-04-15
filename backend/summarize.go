@@ -220,6 +220,11 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 		logger.Error("updating answer status failed", "error", err)
 	}
 
+	snippets := make(map[string]string, len(results))
+	for _, r := range results {
+		snippets[r.URL] = r.Snippet
+	}
+
 	docCh := service.fetch.FetchAndExtractChan(ctx, meta, results, func(url, status, detail string) {
 		service.updateSummaryStatus(ctx, logger, conversationID, url, status, detail)
 	})
@@ -232,12 +237,20 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 	for document := range docCh {
 		fetched[document.URL] = true
 
-		if strings.TrimSpace(document.Text) == "" {
-			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", "Ignored because extracted content was empty.")
-			continue
+		text := strings.TrimSpace(document.Text)
+		if text == "" {
+			// Trafilatura returned nothing — fall back to the search snippet.
+			text = strings.TrimSpace(snippets[document.URL])
+			if text == "" {
+				service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", "Ignored because extracted content was empty.")
+				continue
+			}
+			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "extracting", "Using search snippet as fallback (trafilatura returned no content).")
 		}
-		if len([]rune(strings.TrimSpace(document.Text))) < minSummarySourceChars {
-			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", fmt.Sprintf("Ignored because the extracted text was too short (%d characters).", len([]rune(strings.TrimSpace(document.Text)))))
+		document.Text = text
+
+		if len([]rune(text)) < minSummarySourceChars {
+			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "skipped", fmt.Sprintf("Ignored because the extracted text was too short (%d characters).", len([]rune(text))))
 			continue
 		}
 
@@ -273,7 +286,33 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 
 	for _, result := range results {
 		if !fetched[result.URL] {
-			service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", "Failed to extract source text.")
+			snippet := strings.TrimSpace(result.Snippet)
+			if snippet == "" {
+				service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", "Failed to extract source text.")
+				continue
+			}
+			// Fetch failed entirely but we have a snippet — use it as fallback.
+			service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "extracting", "Using search snippet as fallback (fetch failed).")
+			if err := service.conversations.StoreSourceText(ctx, conversationID, result.URL, snippet); err != nil {
+				logger.Error("storing fallback snippet failed", "url", result.URL, "error", err)
+				service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", err.Error())
+				continue
+			}
+			service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "embedding", "Generating document embeddings.")
+			embedding, err := service.llm.EmbedText(ctx, meta, snippet)
+			if err != nil {
+				logger.Error("snippet embedding failed", "url", result.URL, "error", err)
+				service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", err.Error())
+				continue
+			}
+			embeddingJSON, err := json.Marshal(embedding)
+			if err != nil {
+				service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", err.Error())
+				continue
+			}
+			if err := service.conversations.UpdateDocumentEmbedding(ctx, conversationID, result.URL, string(embeddingJSON)); err != nil {
+				service.updateSummaryStatus(ctx, logger, conversationID, result.URL, "error", err.Error())
+			}
 		}
 	}
 

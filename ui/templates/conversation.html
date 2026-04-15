@@ -55,7 +55,8 @@
           hx-get="/conversations/{{ .Conversation.ID }}/results"
           hx-trigger="load, every 1s [document.querySelector('#results-panel .results-grid') == null], every 5s [document.querySelector('#results-panel .results-grid') != null]"
           hx-swap="innerHTML"
-          hx-on:htmx:after-swap="bapApplyResultsLimit(this)">
+          hx-on:htmx:before-swap="bapSaveHoveredResult(this)"
+          hx-on:htmx:after-swap="bapApplyResultsLimit(this); bapRestoreHoveredResult(this)">
           {{ template "search_results" .Conversation }}
         </div>
       </section>

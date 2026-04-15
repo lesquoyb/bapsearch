@@ -785,7 +785,8 @@ textarea {
 }
 
 .source-hover:hover .source-summary-popover,
-.source-hover:focus-within .source-summary-popover {
+.source-hover:focus-within .source-summary-popover,
+.source-hover--pinned .source-summary-popover {
   opacity: 1;
   visibility: visible;
   transform: translateY(0);

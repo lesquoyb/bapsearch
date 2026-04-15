@@ -159,7 +159,9 @@ func (service *FetchService) fetchDocument(ctx context.Context, meta RequestMeta
 }
 
 func (service *FetchService) extractText(ctx context.Context, rawHTML []byte) (string, error) {
-	command := exec.CommandContext(ctx, service.trafilaturaPath)
+	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(tctx, service.trafilaturaPath)
 	command.Stdin = bytes.NewReader(rawHTML)
 
 	var stdout bytes.Buffer
