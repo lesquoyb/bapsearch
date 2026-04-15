@@ -29,15 +29,6 @@
               <option value="">No model found</option>
             {{ end }}
           </select>
-          <label for="rewrite_model">Rewrite model</label>
-          <p class="muted">Used to rewrite user queries into optimized search terms. Can be a smaller, faster model.</p>
-          <select id="rewrite_model" name="rewrite_model">
-            {{ range .Models }}
-              <option value="{{ .Name }}" {{ if eq .Name $.RewriteModel }}selected{{ end }}>{{ .Name }}</option>
-            {{ else }}
-              <option value="">No model found</option>
-            {{ end }}
-          </select>
           <label for="embedding_model">Embedding model</label>
           <p class="muted">Generates vector embeddings to rank search results by semantic similarity to your query.</p>
           <select id="embedding_model" name="embedding_model">
@@ -219,8 +210,7 @@
           <h3>{{ .Name }}</h3>
           <p>{{ .Path }}</p>
           {{ if eq .Name $.CurrentModel }}<div class="user-pill">Answer</div>{{ end }}
-          {{ if eq .Name $.RewriteModel }}<div class="user-pill">Rewrite</div>{{ end }}
-          {{ if eq .Name $.EmbeddingModel }}<div class="user-pill">Embeddings</div>{{ end }}
+{{ if eq .Name $.EmbeddingModel }}<div class="user-pill">Embeddings</div>{{ end }}
         </article>
         {{ else }}
         <article class="card result-card">

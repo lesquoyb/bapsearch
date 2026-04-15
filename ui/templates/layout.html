@@ -887,7 +887,7 @@
   }
 
   (function () {
-    var ROLE_LABELS = { answer: 'Answer', rewrite: 'Rewrite', embeddings: 'Embeddings' };
+    var ROLE_LABELS = { answer: 'Answer', embeddings: 'Embeddings' };
     var STATUS_LABELS = { loaded: 'ready', loading: 'loading', error: 'error', unknown: 'checking' };
 
     function applyLlamaStatus(el, data) {
@@ -1013,10 +1013,6 @@
       <span class="llama-status-dot llama-status-dot-unknown"></span>
       <span class="llama-status-label">Checking...</span>
     </div>
-    <div class="llama-status" data-role="rewrite" title="Model not checked yet">
-      <span class="llama-status-dot llama-status-dot-unknown"></span>
-      <span class="llama-status-label">Checking...</span>
-    </div>
     <div class="llama-status" data-role="embeddings" title="Model not checked yet">
       <span class="llama-status-dot llama-status-dot-unknown"></span>
       <span class="llama-status-label">Checking...</span>
@@ -1071,8 +1067,6 @@
 <div class="summaries-status" hidden
   data-status="{{ if .AnswerStatus }}{{ .AnswerStatus }}{{ else }}pending{{ end }}"
   data-sources="{{ .ReadySummaryCount }}/{{ .SummaryTarget }}"
-  data-rewrite="{{ rewriteStatusLabel .RewriteStatus }}"
-  data-query="{{ .RewrittenQuery }}"
   data-detail="{{ .AnswerDetail }}"></div>
 {{ end }}
 {{ end }}

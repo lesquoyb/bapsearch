@@ -27,7 +27,7 @@ type LLMService struct {
 	logger            *slog.Logger
 	maxResponseTokens int
 	contextTokens     int
-	maxEmbeddingChars int
+	maxEmbeddingTokens int
 	enableThinking    bool
 	reasoningBudget   int
 	temperature       float64
@@ -349,17 +349,126 @@ func (service *LLMService) GenerateSearchIntent(ctx context.Context, meta Reques
 }
 
 
+// GenerateQueryReformulations asks the LLM to produce n alternative phrasings of
+// query. It returns up to n sanitized queries; the slice may be shorter if the
+// model returns fewer usable lines.
+func (service *LLMService) GenerateQueryReformulations(ctx context.Context, meta RequestMeta, query string, n int) ([]string, error) {
+	prompt := fmt.Sprintf(
+		"Generate %d alternative search queries for the following query. "+
+			"Each reformulation should rephrase or approach the topic differently to maximize search result coverage. "+
+			"Return ONLY the %d queries, one per line, with no numbering, bullets, explanations, or extra text.",
+		n, n,
+	)
+	messages := []LLMMessage{
+		buildSystemMessage(prompt),
+		{Role: "user", Content: query},
+	}
+
+	maxTokens := n * 24
+	if maxTokens < 64 {
+		maxTokens = 64
+	}
+
+	raw, err := service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []string
+	for _, line := range strings.Split(raw, "\n") {
+		if cleaned := sanitizeSearchQuery(strings.TrimSpace(line)); cleaned != "" {
+			results = append(results, cleaned)
+			if len(results) >= n {
+				break
+			}
+		}
+	}
+	return results, nil
+}
+
+// truncateToTokens calls the llama.cpp /tokenize endpoint and truncates text so
+// it fits within maxTokens. Falls back to character-based truncation on error.
+func (service *LLMService) truncateToTokens(ctx context.Context, text string, maxTokens int) string {
+	embURL := strings.TrimSpace(service.embeddingsURL)
+	if embURL == "" {
+		return text
+	}
+	// Derive base URL: strip everything from the last path component that starts with "v1" or is "embeddings"
+	// e.g. http://llama:8080/v1/embeddings -> http://llama:8080
+	baseURL := embURL
+	if idx := strings.Index(baseURL, "/v1/"); idx != -1 {
+		baseURL = baseURL[:idx]
+	} else if strings.HasSuffix(baseURL, "/embeddings") {
+		baseURL = strings.TrimSuffix(baseURL, "/embeddings")
+	}
+	tokenizeURL := baseURL + "/tokenize"
+
+	type tokenizeRequest struct {
+		Content string `json:"content"`
+	}
+	type tokenizeResponse struct {
+		Tokens []int `json:"tokens"`
+	}
+
+	payload, _ := json.Marshal(tokenizeRequest{Content: text})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenizeURL, bytes.NewReader(payload))
+	if err != nil {
+		return text
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := service.client.Do(req)
+	if err != nil {
+		return text
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode >= http.StatusBadRequest {
+		return text
+	}
+
+	var tokResp tokenizeResponse
+	if err := json.Unmarshal(body, &tokResp); err != nil || len(tokResp.Tokens) <= maxTokens {
+		return text
+	}
+
+	// Too many tokens: binary-search for the char length that fits.
+	runes := []rune(text)
+	lo, hi := 0, len(runes)
+	for hi-lo > 16 {
+		mid := (lo + hi) / 2
+		candidate, _ := json.Marshal(tokenizeRequest{Content: string(runes[:mid])})
+		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenizeURL, bytes.NewReader(candidate))
+		if err != nil {
+			break
+		}
+		req2.Header.Set("Content-Type", "application/json")
+		resp2, err := service.client.Do(req2)
+		if err != nil {
+			break
+		}
+		b2, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		var tr2 tokenizeResponse
+		if err := json.Unmarshal(b2, &tr2); err != nil {
+			break
+		}
+		if len(tr2.Tokens) <= maxTokens {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return strings.TrimSpace(string(runes[:lo]))
+}
+
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, fmt.Errorf("cannot embed empty text")
 	}
 
-	limit := service.maxEmbeddingChars
-	if limit <= 0 {
-		limit = 1800
-	}
-	text = service.truncateForPrompt(text, limit)
+	text = service.truncateToTokens(ctx, text, service.maxEmbeddingTokens)
 
 	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
 	body, err := json.Marshal(payload)

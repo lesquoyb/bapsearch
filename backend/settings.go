@@ -29,7 +29,6 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 
 	settings := map[string]string{
 		"llm_model":            app.currentModelName(),
-		"rewrite_model":        app.currentModelNameForRole("rewrite"),
 		"embedding_model":      app.currentModelNameForRole("embeddings"),
 		"temperature":          app.conversations.GetSetting(ctx, "temperature", "0.2"),
 		"top_p":                app.conversations.GetSetting(ctx, "top_p", "1.0"),
@@ -53,7 +52,6 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		Conversations:  conversations,
 		Models:         models,
 		CurrentModel:   settings["llm_model"],
-		RewriteModel:   settings["rewrite_model"],
 		EmbeddingModel: settings["embedding_model"],
 		Status:         r.URL.Query().Get("status"),
 		Settings:       settings,
@@ -71,9 +69,6 @@ func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	// Model role assignments (written to files)
 	if model := strings.TrimSpace(r.FormValue("llm_model")); model != "" {
 		_ = os.WriteFile(app.modelPathForRole("answer"), []byte(model), 0o644)
-	}
-	if model := strings.TrimSpace(r.FormValue("rewrite_model")); model != "" {
-		_ = os.WriteFile(app.modelPathForRole("rewrite"), []byte(model), 0o644)
 	}
 	if model := strings.TrimSpace(r.FormValue("embedding_model")); model != "" {
 		_ = os.WriteFile(app.modelPathForRole("embeddings"), []byte(model), 0o644)

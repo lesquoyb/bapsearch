@@ -23,7 +23,6 @@ type ModelInfo struct {
 
 const (
 	modelRoleAnswer     = "answer"
-	modelRoleRewrite    = "rewrite"
 	modelRoleEmbeddings = "embeddings"
 )
 
@@ -528,8 +527,6 @@ func (app *App) currentModelNameForRole(role string) string {
 
 func (app *App) modelPathForRole(role string) string {
 	switch normalizeModelRole(role) {
-	case modelRoleRewrite:
-		return filepath.Join(app.cfg.ModelsDir, "current-rewrite-model.txt")
 	case modelRoleEmbeddings:
 		return filepath.Join(app.cfg.ModelsDir, "current-embedding-model.txt")
 	default:
@@ -539,8 +536,6 @@ func (app *App) modelPathForRole(role string) string {
 
 func normalizeModelRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case modelRoleRewrite:
-		return modelRoleRewrite
 	case modelRoleEmbeddings:
 		return modelRoleEmbeddings
 	default:

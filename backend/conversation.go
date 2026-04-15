@@ -53,8 +53,6 @@ type ConversationView struct {
 	UserID               string
 	Title                string
 	RewrittenQuery       string
-	RewriteStatus        string
-	RewriteDetail        string
 	AnswerStatus         string
 	AnswerDetail         string
 	OriginalResultCount  int
@@ -1921,20 +1919,6 @@ func (service *ConversationService) StoreRewrittenQuery(ctx context.Context, con
 	return err
 }
 
-func (service *ConversationService) UpdateRewriteStatus(ctx context.Context, conversationID int64, status, detail string) error {
-	_, err := service.db.ExecContext(ctx, `
-		UPDATE conversations
-		SET rewrite_status = ?, rewrite_detail = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, strings.TrimSpace(status), strings.TrimSpace(detail), conversationID)
-	return err
-}
-
-func (service *ConversationService) GetRewrittenQuery(ctx context.Context, conversationID int64) (string, error) {
-	var value string
-	err := service.db.QueryRowContext(ctx, `SELECT rewritten_query FROM conversations WHERE id = ?`, conversationID).Scan(&value)
-	return value, err
-}
 
 func (service *ConversationService) UpdateAnswerStatus(ctx context.Context, conversationID int64, status, detail string) error {
 	_, err := service.db.ExecContext(ctx, `
@@ -2040,11 +2024,11 @@ func (service *ConversationService) UpdateDocumentRanking(ctx context.Context, c
 func (service *ConversationService) GetConversationView(ctx context.Context, userID string, conversationID int64) (ConversationView, error) {
 	conversation := ConversationView{}
 	row := service.db.QueryRowContext(ctx, `
-		SELECT id, user_id, title, rewritten_query, rewrite_status, rewrite_detail, answer_status, answer_detail, created_at, updated_at
+		SELECT id, user_id, title, rewritten_query, answer_status, answer_detail, created_at, updated_at
         FROM conversations
         WHERE id = ? AND user_id = ?
     `, conversationID, userID)
-	if err := row.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.RewrittenQuery, &conversation.RewriteStatus, &conversation.RewriteDetail, &conversation.AnswerStatus, &conversation.AnswerDetail, &conversation.CreatedAt, &conversation.UpdatedAt); err != nil {
+	if err := row.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.RewrittenQuery, &conversation.AnswerStatus, &conversation.AnswerDetail, &conversation.CreatedAt, &conversation.UpdatedAt); err != nil {
 		return ConversationView{}, err
 	}
 
@@ -2127,7 +2111,7 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE conversations
-		SET rewritten_query = '', rewrite_status = 'pending', rewrite_detail = '', answer_status = 'searching', answer_detail = 'Reprocessing the existing raw results.', updated_at = CURRENT_TIMESTAMP
+		SET rewritten_query = '', answer_status = 'searching', answer_detail = 'Reprocessing the existing raw results.', updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, conversationID); err != nil {
 		return err

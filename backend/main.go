@@ -37,7 +37,7 @@ type Config struct {
 	TrafilaturaPath      string
 	SummarizeURLLimit    int
 	MaxExtractChars      int
-	MaxEmbeddingChars    int
+	MaxEmbeddingTokens    int
 	FetchWorkers         int
 	SummaryWorkers       int
 	SummaryQueueSize     int
@@ -49,6 +49,7 @@ type Config struct {
 	LLMContextTokens     int
 	AllowAnonymous       bool
 	SessionSecret        string
+	QueryReformulations  int
 }
 
 type App struct {
@@ -76,7 +77,6 @@ type PageData struct {
 	Query          string
 	Models         []ModelInfo
 	CurrentModel   string
-	RewriteModel   string
 	EmbeddingModel string
 	Error          string
 	Status         string
@@ -213,18 +213,6 @@ func main() {
 		"append": func(slice []string, item string) []string {
 			return append(slice, item)
 		},
-		"rewriteStatusLabel": func(status string) string {
-			switch strings.TrimSpace(status) {
-			case "running":
-				return "Rewriting query"
-			case "succeeded":
-				return "Rewrite succeeded"
-			case "failed":
-				return "Using original query"
-			default:
-				return "Rewrite pending"
-			}
-		},
 	}).ParseGlob(cfg.TemplateGlob)
 	if err != nil {
 		logger.Error("failed to parse templates", "error", err, "glob", cfg.TemplateGlob)
@@ -239,7 +227,7 @@ func main() {
 		logger:            logger,
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
-		maxEmbeddingChars: cfg.MaxEmbeddingChars,
+		maxEmbeddingTokens: cfg.MaxEmbeddingTokens,
 		enableThinking:    true,
 		reasoningBudget:   2048,
 		temperature:       0.2,
@@ -249,13 +237,14 @@ func main() {
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	summarizeService := &SummarizeService{
-		conversations: conversations,
-		search:        &SearchService{baseURL: cfg.SearchURL, client: &http.Client{Timeout: 20 * time.Second}},
-		fetch:         fetchService,
-		llm:           llm,
-		memory:        memoryService,
-		logger:        logger,
-		urlLimit:      cfg.SummarizeURLLimit,
+		conversations:       conversations,
+		search:              &SearchService{baseURL: cfg.SearchURL, client: &http.Client{Timeout: 20 * time.Second}},
+		fetch:               fetchService,
+		llm:                 llm,
+		memory:              memoryService,
+		logger:              logger,
+		urlLimit:            cfg.SummarizeURLLimit,
+		queryReformulations: cfg.QueryReformulations,
 	}
 
 	app := &App{
@@ -602,7 +591,7 @@ func loadConfig() Config {
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 12000),
-		MaxEmbeddingChars:    envOrDefaultInt("BAP_MAX_EMBEDDING_CHARS", 1600),
+		MaxEmbeddingTokens:    envOrDefaultInt("BAP_MAX_EMBEDDING_TOKENS", 500),
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
@@ -614,6 +603,7 @@ func loadConfig() Config {
 		LLMContextTokens:     envOrDefaultInt("BAP_LLM_CONTEXT_TOKENS", 8192),
 		AllowAnonymous:       envOrDefault("BAP_ALLOW_ANONYMOUS", "true") == "true",
 		SessionSecret:        envOrDefault("BAP_SESSION_SECRET", ""),
+		QueryReformulations:  envOrDefaultInt("BAP_QUERY_REFORMULATIONS", 0),
 	}
 }
 
