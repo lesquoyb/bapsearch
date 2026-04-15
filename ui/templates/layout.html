@@ -117,10 +117,76 @@
     }
   }
 
+  // ===== Layout toggle (expanded results-only ↔ split results+LLM) =====
+  var LAYOUT_EXPANDED = 'conversation-body--expanded';
+  var LAYOUT_SPLIT    = 'conversation-body--split';
+
+  function bapCurrentLayout() {
+    var body = document.getElementById('conversation-body');
+    if (!body) return null;
+    if (body.classList.contains(LAYOUT_SPLIT))    return 'split';
+    if (body.classList.contains(LAYOUT_EXPANDED)) return 'expanded';
+    return 'base';
+  }
+
+  function bapSetLayout(mode) {
+    var body = document.getElementById('conversation-body');
+    if (!body) return;
+    body.classList.remove(LAYOUT_EXPANDED, LAYOUT_SPLIT);
+    if (mode === 'split')    body.classList.add(LAYOUT_SPLIT);
+    if (mode === 'expanded') body.classList.add(LAYOUT_EXPANDED);
+    bapUpdateToggleButton();
+  }
+
+  function bapUpdateToggleButton() {
+    var divider = document.getElementById('layout-divider');
+    if (!divider) return;
+    var isExpanded = bapCurrentLayout() === 'expanded';
+    var arrow = divider.querySelector('.layout-divider-arrow');
+    // In split: arrow → means "push chat right to hide it" (go to expanded)
+    // In expanded: divider is hidden anyway, but arrow ← means "pull chat back"
+    if (arrow) arrow.style.content = ''; // reset; CSS ::after handles it
+    divider.title = isExpanded ? 'Show answer' : 'Hide answer';
+    if (arrow) {
+      // › = push right (split→expanded), ‹ = pull left (expanded→split, not visible)
+      arrow.dataset.dir = isExpanded ? 'left' : 'right';
+    }
+  }
+
+  function bapLayoutKey() {
+    var body = document.getElementById('conversation-body');
+    var cid = body && body.closest('[data-conversation-id]');
+    if (!cid) {
+      var panel = document.getElementById('results-panel');
+      cid = panel && panel.dataset.conversationId;
+    } else {
+      cid = cid.dataset.conversationId;
+    }
+    return 'bap-layout-override-' + (cid || 'global');
+  }
+
+  function bapToggleLayout() {
+    var current = bapCurrentLayout();
+    var next = current === 'expanded' ? 'split' : 'expanded';
+    bapSetLayout(next);
+    try { sessionStorage.setItem(bapLayoutKey(), next); } catch(e) {}
+  }
+
+  // Auto-switch to split when LLM starts streaming.
+  // Respects a per-conversation manual override stored in sessionStorage.
+  function bapAutoSwitchToSplit() {
+    try { if (sessionStorage.getItem(bapLayoutKey())) return; } catch(e) {}
+    if (bapCurrentLayout() !== 'expanded') return;
+    bapSetLayout('split');
+  }
+
+  document.addEventListener('DOMContentLoaded', function() { bapUpdateToggleButton(); });
+
   function bapStartContinuationStream(basePath, url, formData, chatMessages, refreshUrl) {
     var limitThread = chatMessages.querySelector('.search-limit-thread');
     if (limitThread) limitThread.remove();
     window.bapStreamInFlight = true;
+    bapAutoSwitchToSplit();
 
     var aBody = document.createElement('div');
     aBody.className = 'message-body markdown-body';
@@ -299,9 +365,6 @@
       anchor.dataset.inFlight = 'true';
       window.bapStreamInFlight = true;
 
-      var convBody = document.getElementById('conversation-body');
-      if (convBody) convBody.classList.add('conversation-body--split');
-
       var aThread = chatMessages.querySelector('.chat-thread.is-initial-stream');
       var aBubble;
       var aBody;
@@ -380,6 +443,7 @@
                 try {
                   var rToken = JSON.parse(dataLine);
                   if (!aReasoning) {
+                    bapAutoSwitchToSplit();
                     var details = bapMakeReasoningDetails();
                     var pre = document.createElement('pre');
                     pre.className = 'reasoning-content';
@@ -430,6 +494,7 @@
               } else if (dataLine) {
                 try {
                   var token = JSON.parse(dataLine);
+                  if (!accumulated) bapAutoSwitchToSplit();
                   bapClearTypingDots(aBody);
                   bapAppendToken(aBody, token);
                   accumulated += token;
@@ -1058,6 +1123,18 @@
 
 {{ define "search_results" }}
 {{ if .SearchResults }}
+{{ $queries := uniqueQueryTexts .SearchResults }}
+{{ if gt (len $queries) 1 }}
+<div class="results-query-pills">
+  {{ range $queries }}
+  <button type="button" class="search-query-pill" data-query-text="{{ . }}" title="Filter results by this query">
+    <span class="search-query-pill-icon">&#128269;</span>
+    <span class="search-query-pill-text">{{ . }}</span>
+    <span class="search-query-pill-count">{{ countByQueryText $.SearchResults . }}</span>
+  </button>
+  {{ end }}
+</div>
+{{ end }}
 <div class="results-grid">
   {{ range $i, $r := .SearchResults }}
   {{ $summary := index $.SummaryLookup $r.URL }}

@@ -1348,9 +1348,9 @@ textarea {
 
 .conversation-body--split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 2fr);
   grid-template-rows: 1fr;
-  column-gap: 20px;
+  column-gap: 0;
   align-items: stretch;
   height: 100%;
 }
@@ -1362,6 +1362,14 @@ textarea {
   min-height: 400px;
   overflow: hidden;
   gap: 0;
+}
+
+.conversation-body--split > .section-block:first-child {
+  padding-right: 10px;
+}
+
+.conversation-body--split > .section-block#chat {
+  padding-left: 10px;
 }
 
 /* Header always at the top, never scrolls */
@@ -1411,6 +1419,141 @@ textarea {
 
 .conversation-body--split .result-card-snippet {
   display: none;
+}
+
+/* ===== Layout divider (split toggle handle) ===== */
+
+.layout-divider {
+  display: none; /* hidden in expanded mode */
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  width: 12px;
+  flex-shrink: 0;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+}
+
+.conversation-body--split .layout-divider {
+  display: flex;
+}
+
+.layout-divider::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  background: var(--line);
+  transition: background 120ms, width 120ms;
+  z-index: -1;
+}
+
+.layout-divider:hover::before {
+  background: var(--accent);
+  width: 2px;
+}
+
+.layout-divider-arrow {
+  position: relative;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--ink);
+  transition: background 120ms, border-color 120ms, color 120ms;
+  flex-shrink: 0;
+}
+
+/* Arrow points right (›) in split = "push chat away" */
+.layout-divider-arrow::after {
+  content: '›';
+  line-height: 1;
+}
+
+/* Arrow points left (‹) when chat is hidden → show divider on right edge in expanded mode */
+.layout-divider-arrow[data-dir="left"]::after {
+  content: '‹';
+}
+
+/* In expanded mode: show divider as a floating pull-tab on the right edge of results */
+.conversation-body--expanded .layout-divider {
+  display: flex;
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: auto;
+  height: 48px;
+  padding: 0 4px;
+  border-radius: 8px 0 0 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-right: none;
+  box-shadow: var(--shadow);
+}
+
+.conversation-body--expanded .layout-divider::before {
+  display: none;
+}
+
+.conversation-body--expanded .layout-divider-arrow {
+  width: auto;
+  height: auto;
+  border: none;
+  background: none;
+  font-size: 16px;
+  border-radius: 0;
+  color: var(--ink);
+}
+
+.layout-divider:hover .layout-divider-arrow {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+/* ===== Expanded (results-only) layout ===== */
+
+/* Full-width scrollable block, same as non-split */
+.content--conversation > .conversation-body--expanded {
+  display: block;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Hide the LLM chat section entirely in expanded mode */
+.conversation-body--expanded > .section-block#chat {
+  display: none;
+}
+
+/* Results section fills the full width */
+.conversation-body--expanded > .section-block {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Multi-column results grid */
+.conversation-body--expanded .results-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+/* Snippets visible in expanded mode */
+.conversation-body--expanded .result-card-snippet {
+  display: block;
 }
 
 /* ===== Results show-more button ===== */
@@ -1471,6 +1614,26 @@ textarea {
   min-width: 0;
 }
 
+.search-query-pill-count {
+  background: rgba(12, 124, 89, 0.15);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.74rem;
+  font-family: "IBM Plex Mono", monospace;
+  flex-shrink: 0;
+}
+
+.results-query-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.results-query-pills .search-query-pill {
+  margin: 0;
+}
+
 /* Iterative (inline search) result card accent */
 .result-card--iterative {
   border-left: 3px solid rgba(12, 124, 89, 0.4);
@@ -1520,6 +1683,16 @@ textarea {
     grid-template-columns: 1fr;
     grid-template-rows: auto;
     height: auto;
+  }
+
+  .layout-divider {
+    display: none !important;
+  }
+
+  .conversation-body--split > .section-block:first-child,
+  .conversation-body--split > .section-block#chat {
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .conversation-body--split > .section-block {

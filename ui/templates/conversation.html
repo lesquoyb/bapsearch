@@ -25,7 +25,7 @@
       </form>
     </section>
 
-    <div id="conversation-body" class="conversation-body{{ if .Conversation.OverviewSummary }} conversation-body--split{{ end }}">
+    <div id="conversation-body" class="conversation-body{{ if .Conversation.OverviewSummary }} conversation-body--split{{ else }} conversation-body--expanded{{ end }}">
 
       <section class="section-block">
         <div class="section-header section-header-inline">
@@ -60,6 +60,10 @@
           {{ template "search_results" .Conversation }}
         </div>
       </section>
+
+      <button id="layout-divider" class="layout-divider" onclick="bapToggleLayout()" aria-label="Toggle layout">
+        <span class="layout-divider-arrow"></span>
+      </button>
 
       <section class="section-block" id="chat">
         <div class="section-header">

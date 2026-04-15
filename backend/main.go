@@ -204,6 +204,26 @@ func main() {
 		"searchQueryText": func(msg MessageRecord) string {
 			return strings.TrimPrefix(msg.Content, "search_query:")
 		},
+		"uniqueQueryTexts": func(results []SearchResult) []string {
+			seen := make(map[string]bool)
+			var out []string
+			for _, r := range results {
+				if r.QueryText != "" && !seen[r.QueryText] {
+					seen[r.QueryText] = true
+					out = append(out, r.QueryText)
+				}
+			}
+			return out
+		},
+		"countByQueryText": func(results []SearchResult, qt string) int {
+			n := 0
+			for _, r := range results {
+				if r.QueryText == qt {
+					n++
+				}
+			}
+			return n
+		},
 		"slice": func(items ...string) []string {
 			if len(items) == 0 {
 				return []string{}
