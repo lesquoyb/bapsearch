@@ -217,6 +217,14 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 		})
 	}
 
+	// Publish the final ranked order so the frontend can reorder cards in one
+	// deterministic step rather than shuffling them as individual scores arrive.
+	orderedURLs := make([]string, 0, len(rankedSources))
+	for _, src := range rankedSources {
+		orderedURLs = append(orderedURLs, src.URL)
+	}
+	service.events.Publish(job.ConversationID, "reorder", ReorderEvent{URLs: orderedURLs})
+
 	detail := fmt.Sprintf("Ready to stream an answer from the top %d ranked sources.", readyCount)
 	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "ready", detail); err != nil {
 		logger.Error("updating answer status failed", "error", err)

@@ -27,6 +27,13 @@ type PipelineEvent struct {
 	Target     int    `json:"target"`
 }
 
+// ReorderEvent is published once after ranking finishes, carrying the URLs in
+// their final similarity-ranked order. The frontend uses this to reorder cards
+// in a single deterministic step instead of shuffling them as scores arrive.
+type ReorderEvent struct {
+	URLs []string `json:"urls"`
+}
+
 type EventBroker struct {
 	mu   sync.RWMutex
 	subs map[int64]map[chan SSEEvent]struct{}

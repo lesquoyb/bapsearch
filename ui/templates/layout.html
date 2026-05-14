@@ -976,28 +976,28 @@
       }
     });
   }
-  // Client-side mirror of backend/conversation.go sortResultsByStatus.
-  function bapSortResultsByStatus(panel) {
+  // Reorder result cards once according to a URL array (final ranked order).
+  // Called in response to the "reorder" SSE event after the pipeline finishes
+  // ranking, so cards don't shuffle around as individual similarity scores
+  // arrive one by one.
+  function bapReorderResultsByURLs(panel, orderedURLs) {
     var grid = panel.querySelector('.results-grid');
-    if (!grid) return;
-    function priority(card) {
-      var dot = card.querySelector('.result-status-dot');
-      if (!dot) return 1;
-      var cls = dot.className || '';
-      if (/result-status-dot-(fetching|cleaning|embedding|extracting)/.test(cls)) return 0;
-      if (/result-status-dot-error/.test(cls)) return 3;
-      if (/result-status-dot-skipped/.test(cls)) return 2;
-      return 1;
-    }
-    var cards = Array.prototype.slice.call(grid.querySelectorAll('.result-card'));
-    // Stable sort: decorate with original index.
-    cards.forEach(function(c, i) { c._bapIdx = i; });
-    cards.sort(function(a, b) {
-      var pa = priority(a), pb = priority(b);
-      if (pa !== pb) return pa - pb;
-      return a._bapIdx - b._bapIdx;
+    if (!grid || !orderedURLs || !orderedURLs.length) return;
+    var byURL = {};
+    grid.querySelectorAll('.result-card').forEach(function(card) {
+      var u = card.getAttribute('data-url');
+      if (u) byURL[u] = card;
     });
-    cards.forEach(function(c) { grid.appendChild(c); });
+    // Append cards in ranked order — unmentioned cards keep their relative
+    // position at the end.
+    var seen = {};
+    orderedURLs.forEach(function(url) {
+      var card = byURL[url];
+      if (card) {
+        grid.appendChild(card);
+        seen[url] = true;
+      }
+    });
   }
 
   // ── SSE: real-time card / pipeline updates ────────────────────────────────
@@ -1033,15 +1033,16 @@
       var card = panel.querySelector('[data-url="' + CSS.escape(url) + '"]');
       if (!card) return;
 
-      // Update status dot
+      // Update status dot. We deliberately do NOT reorder cards on status
+      // changes — that caused cards to bounce around for ~1 minute while the
+      // pipeline progressed. The final ranked order is applied once via the
+      // "reorder" event below.
       if (data.status) {
         var dot = card.querySelector('.result-status-dot');
         if (dot) {
           dot.className = 'result-status-dot result-status-dot-' + data.status;
           if (data.detail) dot.title = data.detail;
         }
-        bapSortResultsByStatus(panel);
-        bapApplyResultsLimit(panel);
       }
 
       var popover = card.querySelector('.source-summary-popover');
@@ -1087,6 +1088,18 @@
         if (text.length > 400) text = text.slice(0, 400) + '…';
         excerptEl.textContent = text;
       }
+    });
+
+    es.addEventListener('reorder', function(e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch(_) { return; }
+      if (!data || !Array.isArray(data.urls)) return;
+      var panel = document.getElementById('results-panel');
+      if (!panel) return;
+      bapSaveHoveredResult(panel);
+      bapReorderResultsByURLs(panel, data.urls);
+      bapApplyResultsLimit(panel);
+      bapRestoreHoveredResult(panel);
     });
 
     es.addEventListener('pipeline', function(e) {

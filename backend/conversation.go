@@ -2086,9 +2086,9 @@ func (service *ConversationService) GetConversationView(ctx context.Context, use
 	}
 	conversation.Summaries = summaries
 	conversation.SummaryLookup = buildSummaryLookup(summaries)
-	// Sink error/skipped results to the bottom while preserving the relative
-	// order of all other entries (pending, extracting, embedding, ready, …).
-	sortResultsByStatus(conversation.SearchResults, conversation.SummaryLookup)
+	// Results stay in their original SearXNG/insertion order until ranking
+	// finishes; the frontend then applies the final similarity-based order
+	// once, in response to a "reorder" SSE event.
 	conversation.ReadySummaryCount = countReadySummaries(summaries)
 	conversation.SummaryTarget = service.summaryTarget
 	if conversation.SummaryTarget <= 0 {
@@ -2542,29 +2542,6 @@ func chatFailureMessage(err error) string {
 	}
 
 	return "The model request failed before a reply was generated. Please try again."
-}
-
-// sortResultsByStatus performs a stable sort with explicit priority tiers:
-//  0 – in-progress (fetching, cleaning, embedding, extracting)
-//  1 – other / unknown (pending, ready, …)
-//  2 – skipped
-//  3 – error
-func sortResultsByStatus(results []SearchResult, lookup map[string]SummaryRecord) {
-	priority := func(r SearchResult) int {
-		switch lookup[r.URL].Status {
-		case "fetching", "cleaning", "embedding", "extracting":
-			return 0
-		case "error":
-			return 3
-		case "skipped":
-			return 2
-		default:
-			return 1
-		}
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		return priority(results[i]) < priority(results[j])
-	})
 }
 
 func buildSummaryLookup(summaries []SummaryRecord) map[string]SummaryRecord {
