@@ -823,8 +823,10 @@ textarea {
 }
 
 .source-summary-popover {
-  position: absolute;
-  top: calc(100% + 10px);
+  position: fixed;
+  /* top/left set via JS at hover-enter so the bubble escapes any overflow:hidden
+     ancestor (results-panel, conversation-body--split, section-block, …). */
+  top: 0;
   left: 0;
   width: min(420px, 72vw);
   max-height: min(68vh, 560px);
@@ -841,7 +843,7 @@ textarea {
   overflow: auto;
   overscroll-behavior: contain;
   transition: opacity 160ms ease, visibility 160ms ease, transform 160ms ease;
-  z-index: 20;
+  z-index: 2000;
 }
 
 .popover-header-row {

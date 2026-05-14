@@ -70,7 +70,49 @@
     bapRenderMath(document.body);
     bapInitEngineOverflow();
     bapMovePillsIntoMessages(document);
+    bapInitFloatingPopovers();
   });
+
+  // Position .source-summary-popover bubbles in viewport space so they escape
+  // overflow:hidden ancestors (results panel, split column, …). Triggered on
+  // pointerenter/focusin on the .source-hover anchor, plus a window resize
+  // listener that re-positions any pinned popover.
+  function bapPositionPopover(hover) {
+    var pop = hover.querySelector(':scope > .source-summary-popover');
+    if (!pop) return;
+    var trigger = hover.querySelector('.source-hover-head') || hover;
+    var rect = trigger.getBoundingClientRect();
+    var popWidth = pop.offsetWidth || 420;
+    var margin = 12;
+    var top = rect.bottom + 10;
+    var left = rect.left;
+    if (left + popWidth + margin > window.innerWidth) {
+      left = window.innerWidth - popWidth - margin;
+    }
+    if (left < margin) left = margin;
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  function bapInitFloatingPopovers() {
+    if (window.bapPopoversWired) return;
+    window.bapPopoversWired = true;
+    document.addEventListener('pointerenter', function(e) {
+      var hover = e.target.closest && e.target.closest('.source-hover');
+      if (hover) bapPositionPopover(hover);
+    }, true);
+    document.addEventListener('focusin', function(e) {
+      var hover = e.target.closest && e.target.closest('.source-hover');
+      if (hover) bapPositionPopover(hover);
+    });
+    window.addEventListener('resize', function() {
+      document.querySelectorAll('.source-hover--pinned').forEach(bapPositionPopover);
+    });
+    // Reposition pinned popovers when the results panel scrolls.
+    document.addEventListener('scroll', function(e) {
+      document.querySelectorAll('.source-hover--pinned').forEach(bapPositionPopover);
+    }, true);
+  }
 
   document.body.addEventListener('htmx:afterSwap', function (event) {
     bapRenderMath(event.target);
