@@ -692,9 +692,12 @@ func (service *LLMService) newLlamaChatRequest(messages []LLMMessage, maxTokens 
 		req.ChatTemplateKwargs = map[string]any{"enable_thinking": true}
 		req.ReasoningBudget = &budget
 	} else {
-		budget := 0
+		// Don't set reasoning_budget when thinking is off — llama.cpp logs
+		// the field's presence as "reasoning budget activated" even when the
+		// value is 0, which made users think their unchecked setting hadn't
+		// taken effect. The chat template kwarg alone is enough to disable
+		// thinking on models that support it.
 		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
-		req.ReasoningBudget = &budget
 	}
 	return req
 }
