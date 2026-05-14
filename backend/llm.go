@@ -33,6 +33,7 @@ type LLMService struct {
 	maxResponseTokens int
 	contextTokens     int
 	maxEmbeddingTokens int
+	embeddingBatchSize int
 	enableThinking    bool
 	reasoningBudget   int
 	temperature       float64

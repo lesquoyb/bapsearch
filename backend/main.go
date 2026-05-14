@@ -262,6 +262,7 @@ func main() {
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
 		maxEmbeddingTokens: cfg.MaxEmbeddingTokens,
+		embeddingBatchSize: 1,
 		enableThinking:    true,
 		reasoningBudget:   2048,
 		temperature:       0.2,
@@ -409,6 +410,17 @@ func (app *App) loadSettingsFromDB() {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			app.cfg.FetchWorkers = n
 			app.fetch.workerCount = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "max_embedding_tokens", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.cfg.MaxEmbeddingTokens = n
+			app.llm.maxEmbeddingTokens = n
+		}
+	}
+	if v := app.conversations.GetSetting(ctx, "embedding_batch_size", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			app.llm.embeddingBatchSize = n
 		}
 	}
 }

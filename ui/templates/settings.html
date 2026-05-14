@@ -38,6 +38,20 @@
               <option value="">No model found</option>
             {{ end }}
           </select>
+
+          <label for="max_embedding_tokens">Max tokens per embedded chunk</label>
+          <p class="muted">How many tokens of each fetched page (and of the query) we send to the embedding model. The container's <code>LLAMA_EMBEDDINGS_CTX_SIZE</code> caps the absolute maximum (default 2048). Raising this captures more of long pages at the cost of slower embedding.</p>
+          <div class="setting-row">
+            <input type="number" step="64" min="64" max="8192" id="max_embedding_tokens" name="max_embedding_tokens" value="{{ index .Settings "max_embedding_tokens" }}" data-default="500">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
+
+          <label for="embedding_batch_size">Embedding batch size</label>
+          <p class="muted">Number of documents embedded per HTTP request. Larger batches reduce per-call overhead but raise peak memory in the embeddings container; 1 keeps requests one-at-a-time (current behaviour).</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="64" id="embedding_batch_size" name="embedding_batch_size" value="{{ index .Settings "embedding_batch_size" }}" data-default="1">
+            <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
+          </div>
         </article>
       </section>
 

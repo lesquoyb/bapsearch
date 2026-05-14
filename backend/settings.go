@@ -36,6 +36,8 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"max_tokens":           app.conversations.GetSetting(ctx, "max_tokens", "1024"),
 		"enable_thinking":      app.conversations.GetSetting(ctx, "enable_thinking", "true"),
 		"reasoning_budget":     app.conversations.GetSetting(ctx, "reasoning_budget", "2048"),
+		"max_embedding_tokens": app.conversations.GetSetting(ctx, "max_embedding_tokens", "500"),
+		"embedding_batch_size": app.conversations.GetSetting(ctx, "embedding_batch_size", "1"),
 		"summarize_url_limit":  app.conversations.GetSetting(ctx, "summarize_url_limit", "3"),
 		"max_extract_chars":    app.conversations.GetSetting(ctx, "max_extract_chars", "12000"),
 		"fetch_workers":        app.conversations.GetSetting(ctx, "fetch_workers", "3"),
@@ -78,6 +80,7 @@ func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	dbKeys := []string{
 		"temperature", "top_p", "top_k", "max_tokens",
 		"enable_thinking", "reasoning_budget",
+		"max_embedding_tokens", "embedding_batch_size",
 		"summarize_url_limit", "max_extract_chars", "fetch_workers",
 		"chat_context_chars", "max_chat_messages", "max_search_loops",
 		"context_doc_count", "results_display_limit",
