@@ -218,9 +218,30 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleForceAnswerStream(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet:
 		app.handleConversationEvents(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
+		app.handleConversationCancel(w, r, conversationID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (app *App) handleConversationCancel(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	if _, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID); err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+	var cancelled int
+	if app.cancellations != nil {
+		cancelled = app.cancellations.CancelAll(conversationID)
+	}
+	loggerWithMeta(r.Context(), app.logger, conversationID).Info("conversation_cancel_requested", "cancelled_ops", cancelled)
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"cancelled":%d}`, cancelled)
 }
 
 func (app *App) handleConversationView(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -352,6 +373,16 @@ func (app *App) handleConversationRegenerateSummaries(w http.ResponseWriter, r *
 }
 
 func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	// Derive a cancellable context so a POST to /cancel can interrupt the
+	// answer stream from outside this handler.
+	streamCtx, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	if app.cancellations != nil {
+		deregister := app.cancellations.Register(conversationID, cancelStream)
+		defer deregister()
+	}
+	r = r.WithContext(streamCtx)
+
 	meta := requestMetaFromContext(r.Context())
 	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
 	if err != nil {
@@ -564,6 +595,14 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 }
 
 func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	streamCtx, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	if app.cancellations != nil {
+		deregister := app.cancellations.Register(conversationID, cancelStream)
+		defer deregister()
+	}
+	r = r.WithContext(streamCtx)
+
 	meta := requestMetaFromContext(r.Context())
 	message := strings.TrimSpace(r.FormValue("message"))
 	if message == "" {
@@ -728,6 +767,14 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 }
 
 func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter, r *http.Request, conversationID, assistantMessageID int64) {
+	streamCtx, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	if app.cancellations != nil {
+		deregister := app.cancellations.Register(conversationID, cancelStream)
+		defer deregister()
+	}
+	r = r.WithContext(streamCtx)
+
 	meta := requestMetaFromContext(r.Context())
 
 	message, err := app.conversations.TruncateConversationForRegeneration(r.Context(), meta.UserID, conversationID, assistantMessageID)

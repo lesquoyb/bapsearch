@@ -32,6 +32,9 @@
       <div class="pipeline-progress-meta">
         <span id="pipeline-progress-phase">{{ if .Conversation.AnswerStatus }}{{ .Conversation.AnswerStatus }}{{ else }}starting…{{ end }}</span>
         <span id="pipeline-progress-counts">{{ .Conversation.ReadySummaryCount }}/{{ .Conversation.SummaryTarget }}</span>
+        <button type="button" id="pipeline-cancel-btn" class="pipeline-cancel-btn"
+          data-cancel-url="/conversations/{{ .Conversation.ID }}/cancel"
+          title="Stop all inference for this conversation">Stop</button>
       </div>
     </div>
 

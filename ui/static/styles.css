@@ -410,6 +410,8 @@ progress {
 
 .pipeline-progress-meta {
   display: flex;
+  align-items: center;
+  gap: 0.75rem;
   justify-content: space-between;
   font-size: 0.78rem;
   color: var(--muted);
@@ -418,6 +420,29 @@ progress {
 
 #pipeline-progress-phase::first-letter {
   text-transform: uppercase;
+}
+
+.pipeline-cancel-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.pipeline-cancel-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.pipeline-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .conversation-hero-bar {

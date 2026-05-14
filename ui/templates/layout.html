@@ -1008,6 +1008,26 @@
 
     var es = new EventSource(eventsUrl);
 
+    // Wire the Stop button to POST /cancel. Any in-flight pipeline job,
+    // answer stream, or chat message stream registered with the backend
+    // Cancellations registry will have its context cancelled.
+    var cancelBtn = document.getElementById('pipeline-cancel-btn');
+    if (cancelBtn && !cancelBtn.dataset.bapWired) {
+      cancelBtn.dataset.bapWired = '1';
+      cancelBtn.addEventListener('click', function() {
+        var url = cancelBtn.dataset.cancelUrl;
+        if (!url) return;
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = 'Stopping…';
+        fetch(url, { method: 'POST' }).catch(function(){}).finally(function() {
+          setTimeout(function() {
+            cancelBtn.disabled = false;
+            cancelBtn.textContent = 'Stop';
+          }, 1500);
+        });
+      });
+    }
+
     es.addEventListener('results', function() {
       // New search results arrived — reload the results panel.
       var panel = document.getElementById('results-panel');

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,6 +44,7 @@ type SummarizeService struct {
 	urlLimit            int
 	queryReformulations int
 	events              *EventBroker
+	cancellations       *Cancellations
 }
 
 func (service *SummarizeService) StartWorkers(jobs <-chan SummaryJob, workerCount int) {
@@ -56,7 +58,12 @@ func (service *SummarizeService) StartWorkers(jobs <-chan SummaryJob, workerCoun
 }
 
 func (service *SummarizeService) runJob(job SummaryJob) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if service.cancellations != nil {
+		deregister := service.cancellations.Register(job.ConversationID, cancel)
+		defer deregister()
+	}
 	jobContext := context.WithValue(ctx, requestMetaKey, RequestMeta{RequestID: newRequestID(), UserID: job.UserID, ConversationID: job.ConversationID})
 	meta := RequestMeta{RequestID: newRequestID(), UserID: job.UserID, ConversationID: job.ConversationID}
 	logger := loggerWithMeta(jobContext, service.logger, job.ConversationID)
@@ -349,11 +356,26 @@ func (service *SummarizeService) rankSources(ctx context.Context, logger *slog.L
 }
 
 func (service *SummarizeService) failPipeline(ctx context.Context, logger *slog.Logger, conversationID int64, err error) {
-	logger.Error("pipeline_failed", "error", err)
-	if statusErr := service.conversations.UpdateAnswerStatus(ctx, conversationID, "error", err.Error()); statusErr != nil {
+	// Distinguish user-initiated cancellation from real failures so the UI can
+	// render a calmer "cancelled" state instead of a scary error.
+	status := "error"
+	detail := err.Error()
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		status = "cancelled"
+		detail = "Pipeline cancelled."
+	}
+	if status == "error" {
+		logger.Error("pipeline_failed", "error", err)
+	} else {
+		logger.Info("pipeline_cancelled")
+	}
+	// Use a fresh background context for the status write so a cancelled ctx
+	// doesn't prevent us from persisting the final state.
+	persistCtx := context.Background()
+	if statusErr := service.conversations.UpdateAnswerStatus(persistCtx, conversationID, status, detail); statusErr != nil {
 		logger.Error("updating failed pipeline status", "error", statusErr)
 	}
-	service.publishPipeline(ctx, conversationID, "error", err.Error())
+	service.publishPipeline(persistCtx, conversationID, status, detail)
 }
 
 func (service *SummarizeService) updateSummaryStatus(ctx context.Context, logger *slog.Logger, conversationID int64, url, status, detail string) {
@@ -391,6 +413,8 @@ func pipelineProgress(status string, readyCount, target int) int {
 	case "ranking":
 		return 90
 	case "ready":
+		return 100
+	case "cancelled":
 		return 100
 	case "error":
 		return 100

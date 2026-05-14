@@ -65,6 +65,7 @@ type App struct {
 	summarize     *SummarizeService
 	summaryJobs   chan SummaryJob
 	events        *EventBroker
+	cancellations *Cancellations
 
 	modelDownloadMu sync.Mutex
 	modelDownload   ModelDownloadStatus
@@ -258,6 +259,7 @@ func main() {
 	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	eventBroker := NewEventBroker()
+	cancellations := NewCancellations()
 
 	summarizeService := &SummarizeService{
 		conversations:       conversations,
@@ -269,6 +271,7 @@ func main() {
 		urlLimit:            cfg.SummarizeURLLimit,
 		queryReformulations: cfg.QueryReformulations,
 		events:              eventBroker,
+		cancellations:       cancellations,
 	}
 
 	app := &App{
@@ -284,6 +287,7 @@ func main() {
 		summarize:     summarizeService,
 		summaryJobs:   make(chan SummaryJob, cfg.SummaryQueueSize),
 		events:        eventBroker,
+		cancellations: cancellations,
 	}
 
 	app.summarize.StartWorkers(app.summaryJobs, cfg.SummaryWorkers)
