@@ -1341,6 +1341,25 @@
 {{ end }}
 
 {{ define "search_results" }}
+{{ if .EngineStatus }}
+<div class="engine-status-line engine-status-inline" aria-label="Search engine status">
+  <div class="engine-chips-scroller">
+    {{ range .EngineStatus }}
+    <span class="engine-status-chip engine-status-{{ .Status }}" {{ if .Detail }}title="{{ .Detail }}"{{ end }}>{{ engineStatusLabel . }}</span>
+    {{ end }}
+  </div>
+  <div class="engine-overflow-hover source-hover" hidden>
+    <div class="source-hover-head">
+      <span class="engine-status-chip engine-overflow-chip" tabindex="0">···</span>
+    </div>
+    <div class="source-summary-popover engine-overflow-popover">
+      {{ range .EngineStatus }}
+      <p class="engine-overflow-item engine-status-{{ .Status }}">{{ engineStatusLabel . }}</p>
+      {{ end }}
+    </div>
+  </div>
+</div>
+{{ end }}
 {{ if .SearchResults }}
 {{ $queries := uniqueQueryTexts .SearchResults }}
 {{ if gt (len $queries) 1 }}
