@@ -589,6 +589,25 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// If the expected model (file written by the UI) doesn't match what
+	// llama.cpp currently has loaded, surface that explicitly so the UI can
+	// render "Reloading…" instead of pretending the new model is already
+	// serving requests.
+	if status == "loaded" && expectedModel != "" && loadedModel != "" {
+		expBase := strings.ToLower(strings.TrimSpace(expectedModel))
+		loadBase := strings.ToLower(strings.TrimSpace(loadedModel))
+		// Compare the basename without extension to tolerate path differences
+		// between the file content (basename) and llama's /v1/models id.
+		if expBase != loadBase &&
+			!strings.HasSuffix(expBase, loadBase) &&
+			!strings.HasSuffix(loadBase, expBase) {
+			status = "reloading"
+			if detail == "" {
+				detail = "llama.cpp is still serving the previous model"
+			}
+		}
+	}
+
 	json.NewEncoder(w).Encode(responsePayload{Role: role, Status: status, ExpectedModel: expectedModel, LoadedModel: loadedModel, Detail: detail})
 }
 

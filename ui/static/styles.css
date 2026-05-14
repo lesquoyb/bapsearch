@@ -139,7 +139,8 @@ body.sidebar-collapsed .app-shell {
   background: var(--accent);
 }
 
-.llama-status-dot-loading {
+.llama-status-dot-loading,
+.llama-status-dot-reloading {
   background: #c07a10;
   animation: dot-pulse 1.2s ease-in-out infinite;
 }

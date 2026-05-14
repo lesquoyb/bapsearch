@@ -1278,7 +1278,7 @@
 
   (function () {
     var ROLE_LABELS = { answer: 'Answer', embeddings: 'Embeddings' };
-    var STATUS_LABELS = { loaded: 'ready', loading: 'loading', error: 'error', unknown: 'checking' };
+    var STATUS_LABELS = { loaded: 'ready', loading: 'loading', reloading: 'reloading', error: 'error', unknown: 'checking' };
 
     function applyLlamaStatus(el, data) {
       if (!el) return;
@@ -1295,7 +1295,12 @@
       if (dot) dot.className = 'llama-status-dot llama-status-dot-' + status;
 
       var statusLabel = STATUS_LABELS[status] || status;
-      var modelLabel = loadedModel || expectedModel;
+      // When the container is reloading a newly-selected model, show the
+      // *expected* model (the one being loaded) rather than the one still in
+      // memory, otherwise the UI looks like nothing changed.
+      var modelLabel = (status === 'reloading' || status === 'loading')
+        ? (expectedModel || loadedModel)
+        : (loadedModel || expectedModel);
       var labelText = roleLabel + ': ' + statusLabel;
       if (modelLabel) labelText += ' • ' + modelLabel;
       if (label) label.textContent = labelText;
@@ -1317,6 +1322,19 @@
       });
     }
 
+    // After /settings save we kick off accelerated polling (every 2 s for up
+    // to 90 s) so the user gets visible feedback while the llama container
+    // detects the model file change, kills the previous server, and reloads
+    // the new GGUF — instead of waiting up to 30 s for the next normal tick.
+    function bapAcceleratedLlamaPoll(timeoutMs) {
+      var stopAt = Date.now() + (timeoutMs || 90000);
+      var iv = setInterval(function() {
+        if (Date.now() > stopAt) { clearInterval(iv); return; }
+        if (document.visibilityState === 'visible') pollLlamaStatus();
+      }, 2000);
+      return iv;
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
       pollLlamaStatus();
       setInterval(function () {
@@ -1325,6 +1343,9 @@
       document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible') pollLlamaStatus();
       });
+      if (/[?&]status=saved\b/.test(window.location.search)) {
+        bapAcceleratedLlamaPoll(90000);
+      }
     });
   })();
 
