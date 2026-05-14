@@ -34,6 +34,7 @@ type Config struct {
 	ModelsDir            string
 	CurrentModelPath     string
 	LogsPath             string
+	LLMLogsPath          string
 	TrafilaturaPath      string
 	SummarizeURLLimit    int
 	MaxExtractChars      int
@@ -95,6 +96,16 @@ func main() {
 		panic(err)
 	}
 	defer closeLogger()
+
+	llmLogger, closeLLMLogger, err := newFileJSONLogger(cfg.LLMLogsPath)
+	if err != nil {
+		// Non-fatal: fall back to the general logger so we still capture
+		// prompts/responses in /logs/backend.jsonl.
+		logger.Warn("failed to open LLM log file, falling back to general logger", "path", cfg.LLMLogsPath, "error", err)
+		llmLogger = logger
+	} else {
+		defer closeLLMLogger()
+	}
 
 	if cfg.SessionSecret == "" {
 		cfg.SessionSecret = generateSessionSecret()
@@ -247,6 +258,7 @@ func main() {
 		embeddingsURL:     cfg.EmbeddingsURL,
 		client:            &http.Client{Timeout: 10 * time.Minute},
 		logger:            logger,
+		llmLogger:         llmLogger,
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
 		maxEmbeddingTokens: cfg.MaxEmbeddingTokens,
@@ -617,6 +629,7 @@ func loadConfig() Config {
 		ModelsDir:            envOrDefault("BAP_MODELS_DIR", "/models"),
 		CurrentModelPath:     envOrDefault("BAP_CURRENT_MODEL_PATH", "/models/current-model.txt"),
 		LogsPath:             envOrDefault("BAP_LOG_PATH", "/logs/backend.jsonl"),
+		LLMLogsPath:          envOrDefault("BAP_LLM_LOG_PATH", "/logs/llm.jsonl"),
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 12000),

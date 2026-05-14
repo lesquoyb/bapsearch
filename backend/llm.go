@@ -25,6 +25,11 @@ type LLMService struct {
 	embeddingsURL     string
 	client            *http.Client
 	logger            *slog.Logger
+	// llmLogger is a separate logger dedicated to LLM/embedding traffic:
+	// prompts, responses, request payload size, latencies, errors. It writes
+	// to /logs/llm.jsonl by default so prompt content doesn't drown the
+	// general backend log.
+	llmLogger          *slog.Logger
 	maxResponseTokens int
 	contextTokens     int
 	maxEmbeddingTokens int
@@ -34,6 +39,15 @@ type LLMService struct {
 	topP              float64
 	topK              int
 	Prompts           LLMPrompts
+}
+
+// llm returns the dedicated LLM trace logger, falling back to the general
+// logger when none has been configured (e.g. tests).
+func (service *LLMService) llm() *slog.Logger {
+	if service.llmLogger != nil {
+		return service.llmLogger
+	}
+	return service.logger
 }
 
 const (
@@ -169,11 +183,16 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 		promptPreview = append(promptPreview, fmt.Sprintf("[%s] %s", message.Role, strings.TrimSpace(message.Content)))
 	}
 
-	service.logger.Info("llm_prompt",
+	service.llm().Info("llm_prompt",
 		"timestamp", time.Now().UTC().Format(time.RFC3339),
 		"request_id", meta.RequestID,
 		"user_id", meta.UserID,
 		"conversation_id", meta.ConversationID,
+		"endpoint", endpoint,
+		"call", "chat",
+		"streaming", false,
+		"max_tokens", maxTokens,
+		"message_count", len(messages),
 		"prompt", strings.Join(promptPreview, "\n\n"),
 	)
 
@@ -217,11 +236,16 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 			return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
 		}
 	}
-	service.logger.Info("llm_response",
+	service.llm().Info("llm_response",
 		"timestamp", time.Now().UTC().Format(time.RFC3339),
 		"request_id", meta.RequestID,
 		"user_id", meta.UserID,
 		"conversation_id", meta.ConversationID,
+		"endpoint", endpoint,
+		"call", "chat",
+		"status_code", response.StatusCode,
+		"response_chars", len(content),
+		"reasoning_chars", len(strings.TrimSpace(payloadResponse.Choices[0].Message.ReasoningContent)),
 		"response", content,
 	)
 
@@ -251,6 +275,24 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 	if err != nil {
 		return "", err
 	}
+
+	streamPromptPreview := make([]string, 0, len(messages))
+	for _, message := range messages {
+		streamPromptPreview = append(streamPromptPreview, fmt.Sprintf("[%s] %s", message.Role, strings.TrimSpace(message.Content)))
+	}
+	service.llm().Info("llm_prompt",
+		"timestamp", time.Now().UTC().Format(time.RFC3339),
+		"request_id", meta.RequestID,
+		"user_id", meta.UserID,
+		"conversation_id", meta.ConversationID,
+		"endpoint", endpoint,
+		"call", "chat_stream",
+		"streaming", true,
+		"max_tokens", maxTokens,
+		"reasoning", enableThinking,
+		"message_count", len(messages),
+		"prompt", strings.Join(streamPromptPreview, "\n\n"),
+	)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, service.baseURL, bytes.NewReader(body))
 	if endpoint != "" {
@@ -317,11 +359,14 @@ func (service *LLMService) chatStreamWithURL(ctx context.Context, endpoint strin
 			return "", fmt.Errorf("llama.cpp returned reasoning without a final answer")
 		}
 	}
-	service.logger.Info("llm_stream_response",
+	service.llm().Info("llm_stream_response",
+		"timestamp", time.Now().UTC().Format(time.RFC3339),
 		"request_id", meta.RequestID,
 		"user_id", meta.UserID,
 		"conversation_id", meta.ConversationID,
+		"call", "chat_stream",
 		"chars", len(result),
+		"response", result,
 	)
 	return result, nil
 }
@@ -481,6 +526,8 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, fmt.Errorf("embeddings endpoint is not configured")
 	}
 
+	started := time.Now()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -489,6 +536,15 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 
 	resp, err := service.client.Do(req)
 	if err != nil {
+		service.llm().Error("embedding_request_failed",
+			"timestamp", time.Now().UTC().Format(time.RFC3339),
+			"request_id", meta.RequestID,
+			"user_id", meta.UserID,
+			"conversation_id", meta.ConversationID,
+			"endpoint", endpoint,
+			"duration_ms", time.Since(started).Milliseconds(),
+			"error", err.Error(),
+		)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -498,6 +554,15 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, err
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
+		service.llm().Error("embedding_request_status",
+			"timestamp", time.Now().UTC().Format(time.RFC3339),
+			"request_id", meta.RequestID,
+			"user_id", meta.UserID,
+			"conversation_id", meta.ConversationID,
+			"endpoint", endpoint,
+			"status_code", resp.StatusCode,
+			"body", string(responseBody),
+		)
 		return nil, fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(responseBody))
 	}
 
@@ -506,14 +571,27 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, err
 	}
 
-	if len(payloadResponse.Data) > 0 && len(payloadResponse.Data[0].Embedding) > 0 {
-		return payloadResponse.Data[0].Embedding, nil
+	var vector []float64
+	switch {
+	case len(payloadResponse.Data) > 0 && len(payloadResponse.Data[0].Embedding) > 0:
+		vector = payloadResponse.Data[0].Embedding
+	case len(payloadResponse.Embedding) > 0:
+		vector = payloadResponse.Embedding
 	}
-	if len(payloadResponse.Embedding) > 0 {
-		return payloadResponse.Embedding, nil
+	if vector == nil {
+		return nil, fmt.Errorf("embedding endpoint returned no vector")
 	}
-
-	return nil, fmt.Errorf("embedding endpoint returned no vector")
+	service.llm().Info("embedding_response",
+		"timestamp", time.Now().UTC().Format(time.RFC3339),
+		"request_id", meta.RequestID,
+		"user_id", meta.UserID,
+		"conversation_id", meta.ConversationID,
+		"endpoint", endpoint,
+		"input_chars", len(text),
+		"vector_dim", len(vector),
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+	return vector, nil
 }
 
 func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onReasoning func(string)) (string, error) {

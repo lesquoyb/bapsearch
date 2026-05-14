@@ -154,6 +154,7 @@ services:
       BAP_MODELS_DIR: /models
       BAP_CURRENT_MODEL_PATH: /models/current-model.txt
       BAP_LOG_PATH: /logs/backend.jsonl
+      BAP_LLM_LOG_PATH: /logs/llm.jsonl
       BAP_ALLOW_ANONYMOUS: ${BAP_ALLOW_ANONYMOUS:-true}
       BAP_SESSION_SECRET: ${BAP_SESSION_SECRET:-}
       SEARXNG_SEARCH_URL: http://searxng:8080/search

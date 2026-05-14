@@ -39,6 +39,21 @@ func newJSONLogger(logPath string) (*slog.Logger, func() error, error) {
 	return logger, file.Close, nil
 }
 
+// newFileJSONLogger writes JSON lines to logPath only (no stdout). Used for
+// the dedicated LLM trace log so prompt/response payloads don't pollute the
+// general stdout stream.
+func newFileJSONLogger(logPath string) (*slog.Logger, func() error, error) {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return nil, nil, err
+	}
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo})
+	return slog.New(handler), file.Close, nil
+}
+
 func withMiddlewares(next http.Handler, logger *slog.Logger, allowAnonymous bool, sessionSecret string) http.Handler {
 	return recoverMiddleware(logger, authMiddleware(loggingMiddleware(next, logger), allowAnonymous, sessionSecret))
 }
