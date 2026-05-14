@@ -160,9 +160,17 @@ body.sidebar-collapsed .app-shell {
 body.sidebar-collapsed .brand span,
 body.sidebar-collapsed .sidebar-user-row,
 body.sidebar-collapsed .sidebar-section,
-body.sidebar-collapsed .llama-status,
-body.sidebar-collapsed .sidebar-settings-link {
+body.sidebar-collapsed .llama-status {
   display: none;
+}
+
+body.sidebar-collapsed .sidebar-settings-link {
+  /* Keep the settings gear reachable when the sidebar is collapsed —
+     users were stuck having to expand the sidebar to change a parameter. */
+  align-self: center;
+  width: 100%;
+  display: inline-flex;
+  justify-content: center;
 }
 
 body.sidebar-collapsed .sidebar {
