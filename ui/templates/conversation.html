@@ -25,6 +25,16 @@
       </form>
     </section>
 
+    <div id="pipeline-progress"{{ if .Conversation.OverviewSummary }} hidden{{ end }} aria-live="polite">
+      <div class="pipeline-progress-track">
+        <div id="pipeline-progress-fill" class="pipeline-progress-fill" style="width: 0%"></div>
+      </div>
+      <div class="pipeline-progress-meta">
+        <span id="pipeline-progress-phase">{{ if .Conversation.AnswerStatus }}{{ .Conversation.AnswerStatus }}{{ else }}starting…{{ end }}</span>
+        <span id="pipeline-progress-counts">{{ .Conversation.ReadySummaryCount }}/{{ .Conversation.SummaryTarget }}</span>
+      </div>
+    </div>
+
     <div id="conversation-body" class="conversation-body{{ if .Conversation.OverviewSummary }} conversation-body--split{{ else }} conversation-body--expanded{{ end }}"
       data-events-url="/conversations/{{ .Conversation.ID }}/events"
       data-results-url="/conversations/{{ .Conversation.ID }}/results"

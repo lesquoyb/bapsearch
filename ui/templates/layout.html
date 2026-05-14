@@ -1117,6 +1117,25 @@
         detailEl.textContent = data.detail || '';
         detailEl.style.display = data.detail ? '' : 'none';
       }
+
+      // Drive the visible progress bar.
+      var bar = document.getElementById('pipeline-progress');
+      var fill = document.getElementById('pipeline-progress-fill');
+      var phase = document.getElementById('pipeline-progress-phase');
+      var counts = document.getElementById('pipeline-progress-counts');
+      if (bar && fill) {
+        bar.hidden = false;
+        var pct = typeof data.progress === 'number' ? data.progress : 0;
+        if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+        fill.style.width = pct + '%';
+        fill.classList.toggle('is-error', data.status === 'error');
+        if (phase) phase.textContent = data.status || '';
+        if (counts) counts.textContent = (data.ready_count || 0) + '/' + (data.target || 0);
+        if (data.status === 'ready' || data.status === 'error') {
+          // Let the user see the fill complete, then fade the bar out.
+          setTimeout(function() { bar.hidden = true; }, 1200);
+        }
+      }
     });
 
     es.addEventListener('close', function() {

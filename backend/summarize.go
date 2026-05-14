@@ -361,6 +361,42 @@ func (service *SummarizeService) updateSummaryStatus(ctx context.Context, logger
 		logger.Error("updating summary status failed", "url", url, "status", status, "error", err)
 	}
 	service.events.Publish(conversationID, "card", CardEvent{URL: url, Status: status, Detail: detail})
+
+	// Refresh the pipeline progress bar when a card reaches a terminal state.
+	// Without this the bar would only move on the four explicit phase changes
+	// (searching → extracting → ranking → ready) and feel frozen during the
+	// long fetch+embed loop.
+	switch status {
+	case "ready", "skipped", "error":
+		service.publishPipeline(ctx, conversationID, "extracting", detail)
+	}
+}
+
+// pipelineProgress maps the current phase and the ready/target ratio to a
+// 0–100 percentage. The extracting phase covers the longest stretch of work
+// (fetch + extract + embed for every URL), so it gets the widest band.
+func pipelineProgress(status string, readyCount, target int) int {
+	switch status {
+	case "searching":
+		return 5
+	case "extracting":
+		if target <= 0 {
+			return 15
+		}
+		ratio := float64(readyCount) / float64(target)
+		if ratio > 1 {
+			ratio = 1
+		}
+		return 15 + int(ratio*70)
+	case "ranking":
+		return 90
+	case "ready":
+		return 100
+	case "error":
+		return 100
+	default:
+		return 0
+	}
 }
 
 func (service *SummarizeService) publishPipeline(ctx context.Context, conversationID int64, status, detail string) {
@@ -370,6 +406,7 @@ func (service *SummarizeService) publishPipeline(ctx context.Context, conversati
 		Detail:     detail,
 		ReadyCount: readyCount,
 		Target:     service.urlLimit,
+		Progress:   pipelineProgress(status, readyCount, service.urlLimit),
 	})
 }
 

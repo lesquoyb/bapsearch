@@ -20,11 +20,14 @@ type CardEvent struct {
 }
 
 // PipelineEvent is published when the overall pipeline status changes.
+// Progress is a 0–100 percentage derived from the current phase and the
+// ready/target ratio so the frontend can render a single, smooth progress bar.
 type PipelineEvent struct {
 	Status     string `json:"status"`
 	Detail     string `json:"detail"`
 	ReadyCount int    `json:"ready_count"`
 	Target     int    `json:"target"`
+	Progress   int    `json:"progress"`
 }
 
 // ReorderEvent is published once after ranking finishes, carrying the URLs in
