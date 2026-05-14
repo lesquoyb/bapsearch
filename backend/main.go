@@ -423,6 +423,37 @@ func (app *App) loadSettingsFromDB() {
 			app.llm.embeddingBatchSize = n
 		}
 	}
+
+	// Per-call-type sampling overrides. Each profile pulls three optional
+	// keys; zero/empty leaves the global temperature/top_p/top_k in effect.
+	profiles := []CallProfile{ProfileAnswer, ProfileRewrite, ProfileUtility}
+	overrides := map[CallProfile]SamplingParams{}
+	for _, p := range profiles {
+		var override SamplingParams
+		if v := app.conversations.GetSetting(ctx, string(p)+"_temperature", ""); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				override.Temperature = f
+			}
+		}
+		if v := app.conversations.GetSetting(ctx, string(p)+"_top_p", ""); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				override.TopP = f
+			}
+		}
+		if v := app.conversations.GetSetting(ctx, string(p)+"_top_k", ""); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				override.TopK = n
+			}
+		}
+		if override.Temperature != 0 || override.TopP != 0 || override.TopK != 0 {
+			overrides[p] = override
+		}
+	}
+	if len(overrides) > 0 {
+		app.llm.profileSampling = overrides
+	} else {
+		app.llm.profileSampling = nil
+	}
 }
 
 func friendlySiteName(host string) string {

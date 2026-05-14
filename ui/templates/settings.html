@@ -90,6 +90,33 @@
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
         </article>
+
+        <article class="card">
+          <h3>Per-call-type overrides</h3>
+          <p class="muted">Override temperature / top-p / top-k for specific call types. Leave blank to fall back to the global values above. Useful to keep grounded answers deterministic while diversifying query reformulations.</p>
+
+          <label for="rewrite_temperature">Query rewrite — temperature</label>
+          <p class="muted">Higher values (e.g. 0.8) make reformulations more diverse, which often helps SearXNG coverage.</p>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="2" id="rewrite_temperature" name="rewrite_temperature" value="{{ index .Settings "rewrite_temperature" }}" placeholder="fallback: global">
+          </div>
+
+          <label for="rewrite_top_p">Query rewrite — top-p</label>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="1" id="rewrite_top_p" name="rewrite_top_p" value="{{ index .Settings "rewrite_top_p" }}" placeholder="fallback: global">
+          </div>
+
+          <label for="rewrite_top_k">Query rewrite — top-k</label>
+          <div class="setting-row">
+            <input type="number" step="1" min="1" max="200" id="rewrite_top_k" name="rewrite_top_k" value="{{ index .Settings "rewrite_top_k" }}" placeholder="fallback: global">
+          </div>
+
+          <label for="utility_temperature">Utility calls — temperature</label>
+          <p class="muted">Search-intent paragraphs, memory updates, and other internal helpers. Lower values stay closer to the source material.</p>
+          <div class="setting-row">
+            <input type="number" step="0.01" min="0" max="2" id="utility_temperature" name="utility_temperature" value="{{ index .Settings "utility_temperature" }}" placeholder="fallback: global">
+          </div>
+        </article>
       </section>
 
       <!-- Reasoning / Thinking -->

@@ -39,6 +39,10 @@ type LLMService struct {
 	temperature       float64
 	topP              float64
 	topK              int
+	// profileSampling overrides per call-type. Nil/missing keys fall back to
+	// the global temperature/top_p/top_k above. Populated by
+	// App.loadSettingsFromDB from rows like "rewrite_temperature".
+	profileSampling map[CallProfile]SamplingParams
 	Prompts           LLMPrompts
 }
 
@@ -120,10 +124,57 @@ type llamaChatRequest struct {
 	Model              string         `json:"model,omitempty"`
 	Messages           []LLMMessage   `json:"messages"`
 	Temperature        float64        `json:"temperature,omitempty"`
+	TopP               float64        `json:"top_p,omitempty"`
+	TopK               int            `json:"top_k,omitempty"`
 	MaxTokens          int            `json:"max_tokens,omitempty"`
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	ReasoningBudget    *int           `json:"reasoning_budget,omitempty"`
 	Stream             bool           `json:"stream"`
+}
+
+// CallProfile names a sampling profile used to pick per-call-type temperature,
+// top_p, top_k overrides. Profiles are persisted as DB settings (e.g.
+// "rewrite_temperature") and fall back to the global temperature/top_p/top_k
+// when no override is configured.
+type CallProfile string
+
+const (
+	ProfileAnswer  CallProfile = "answer"
+	ProfileRewrite CallProfile = "rewrite"
+	ProfileUtility CallProfile = "utility"
+)
+
+// SamplingParams bundles the three sampler knobs for a single call.
+type SamplingParams struct {
+	Temperature float64
+	TopP        float64
+	TopK        int
+}
+
+// samplingForProfile resolves the active sampling parameters for a given call
+// profile. It reads the profile-specific override from the in-memory map (set
+// by loadSettingsFromDB) and falls back to the global temperature/top_p/top_k.
+func (service *LLMService) samplingForProfile(profile CallProfile) SamplingParams {
+	params := SamplingParams{
+		Temperature: service.temperature,
+		TopP:        service.topP,
+		TopK:        service.topK,
+	}
+	if service.profileSampling == nil {
+		return params
+	}
+	if override, ok := service.profileSampling[profile]; ok {
+		if override.Temperature > 0 {
+			params.Temperature = override.Temperature
+		}
+		if override.TopP > 0 {
+			params.TopP = override.TopP
+		}
+		if override.TopK > 0 {
+			params.TopK = override.TopK
+		}
+	}
+	return params
 }
 
 type llamaChatResponse struct {
@@ -159,10 +210,10 @@ type llamaEmbeddingResponse struct {
 }
 
 func (service *LLMService) Chat(ctx context.Context, meta RequestMeta, messages []LLMMessage, maxTokens int) (string, error) {
-	return service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens)
+	return service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens, ProfileAnswer)
 }
 
-func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int) (string, error) {
+func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, meta RequestMeta, messages []LLMMessage, maxTokens int, profile CallProfile) (string, error) {
 	unlimited := maxTokens < 0
 	if maxTokens <= 0 {
 		maxTokens = service.maxResponseTokens
@@ -173,7 +224,7 @@ func (service *LLMService) chatWithURL(ctx context.Context, endpoint string, met
 	if unlimited {
 		requestMaxTokens = 0
 	}
-	payload := service.newLlamaChatRequest(messages, requestMaxTokens, false, false)
+	payload := service.newLlamaChatRequestForProfile(messages, requestMaxTokens, false, false, profile)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -388,7 +439,7 @@ func (service *LLMService) GenerateSearchIntent(ctx context.Context, meta Reques
 	}
 	messages = append(messages, LLMMessage{Role: "user", Content: "Search query: " + query})
 
-	intent, err := service.chatWithURL(ctx, service.baseURL, meta, messages, 128)
+	intent, err := service.chatWithURL(ctx, service.baseURL, meta, messages, 128, ProfileUtility)
 	if err != nil {
 		return "", err
 	}
@@ -416,7 +467,7 @@ func (service *LLMService) GenerateQueryReformulations(ctx context.Context, meta
 		maxTokens = 64
 	}
 
-	raw, err := service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens)
+	raw, err := service.chatWithURL(ctx, service.baseURL, meta, messages, maxTokens, ProfileRewrite)
 	if err != nil {
 		return nil, err
 	}
@@ -798,10 +849,17 @@ func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMet
 }
 
 func (service *LLMService) newLlamaChatRequest(messages []LLMMessage, maxTokens int, stream bool, enableThinking bool) llamaChatRequest {
+	return service.newLlamaChatRequestForProfile(messages, maxTokens, stream, enableThinking, ProfileAnswer)
+}
+
+func (service *LLMService) newLlamaChatRequestForProfile(messages []LLMMessage, maxTokens int, stream bool, enableThinking bool, profile CallProfile) llamaChatRequest {
+	params := service.samplingForProfile(profile)
 	req := llamaChatRequest{
 		Model:       "local",
 		Messages:    messages,
-		Temperature: service.temperature,
+		Temperature: params.Temperature,
+		TopP:        params.TopP,
+		TopK:        params.TopK,
 		MaxTokens:   maxTokens,
 		Stream:      stream,
 	}
