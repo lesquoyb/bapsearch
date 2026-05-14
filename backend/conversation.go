@@ -220,9 +220,82 @@ func (app *App) handleConversationRoutes(w http.ResponseWriter, r *http.Request)
 		app.handleConversationEvents(w, r, conversationID)
 	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
 		app.handleConversationCancel(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "rerank" && r.Method == http.MethodPost:
+		app.handleConversationRerankOnly(w, r, conversationID)
+	case len(parts) == 2 && parts[1] == "research" && r.Method == http.MethodPost:
+		app.handleConversationResearch(w, r, conversationID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleConversationRerankOnly re-embeds the conversation title and reorders
+// stored sources by similarity, without fetching/extracting/re-embedding any
+// document. Cheap enough to run synchronously — useful when the user tweaks
+// the embedding model or the embedding token budget and wants to see the
+// effect on the existing pool of sources.
+func (app *App) handleConversationRerankOnly(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+
+	app.events.Publish(conversationID, "pipeline", PipelineEvent{Status: "ranking", Detail: "Re-ranking with a fresh query embedding.", Progress: 90})
+
+	embedding, err := app.llm.EmbedText(r.Context(), meta, strings.TrimSpace(conversation.Title))
+	if err != nil {
+		http.Error(w, "failed to embed query: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ranked, err := app.conversations.RerankAllSources(r.Context(), app.logger, conversationID, embedding)
+	if err != nil {
+		http.Error(w, "failed to rerank: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	urls := make([]string, 0, len(ranked))
+	for _, src := range ranked {
+		app.events.Publish(conversationID, "card", CardEvent{URL: src.URL, SimilarityScore: src.SimilarityScore})
+		urls = append(urls, src.URL)
+	}
+	app.events.Publish(conversationID, "reorder", ReorderEvent{URLs: urls})
+	app.events.Publish(conversationID, "pipeline", PipelineEvent{Status: "ready", Detail: "Rerank complete.", Progress: 100})
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"reranked":%d}`, len(ranked))
+}
+
+// handleConversationResearch re-runs the whole search pipeline for this
+// conversation: new SearXNG queries (with fresh reformulations), fetch+embed
+// of newly-discovered URLs, and a final rerank. Existing results are kept;
+// AppendSearchResults already dedupes by URL.
+func (app *App) handleConversationResearch(w http.ResponseWriter, r *http.Request, conversationID int64) {
+	meta := requestMetaFromContext(r.Context())
+	conversation, err := app.conversations.GetConversationView(r.Context(), meta.UserID, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "searching", "Re-running the search pipeline."); err != nil {
+		loggerWithMeta(r.Context(), app.logger, conversationID).Error("research status init failed", "error", err)
+	}
+	app.summaryJobs <- SummaryJob{
+		ConversationID: conversationID,
+		UserID:         meta.UserID,
+		Query:          conversation.Title,
+	}
+	loggerWithMeta(r.Context(), app.logger, conversationID).Info("conversation_research_requested")
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"enqueued":true}`)
 }
 
 func (app *App) handleConversationCancel(w http.ResponseWriter, r *http.Request, conversationID int64) {

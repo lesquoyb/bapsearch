@@ -82,6 +82,12 @@
                 </div>
               </div>
             </div>
+            <form action="/conversations/{{ .Conversation.ID }}/rerank" method="post" data-async-action>
+              <button class="ghost-button icon-button" type="submit" title="Re-embed the query and reorder sources without re-fetching" aria-label="Rerank only">⇅</button>
+            </form>
+            <form action="/conversations/{{ .Conversation.ID }}/research" method="post" data-async-action>
+              <button class="ghost-button icon-button" type="submit" title="Re-run the full search pipeline (new SearXNG queries, fresh reformulations)" aria-label="Re-search">⟲</button>
+            </form>
             <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
               <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
             </form>

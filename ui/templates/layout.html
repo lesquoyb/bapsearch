@@ -72,7 +72,28 @@
     bapMovePillsIntoMessages(document);
     bapInitFloatingPopovers();
     bapInitSearchClearButtons();
+    bapInitAsyncActionForms();
   });
+
+  // Forms tagged data-async-action POST via fetch instead of full submit so
+  // the page stays put and the SSE connection isn't broken. Used by the
+  // partial-relaunch buttons (rerank, re-search) in the conversation header.
+  function bapInitAsyncActionForms() {
+    if (window.bapAsyncFormsWired) return;
+    window.bapAsyncFormsWired = true;
+    document.addEventListener('submit', function(e) {
+      var form = e.target;
+      if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-async-action')) return;
+      e.preventDefault();
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      fetch(form.action, { method: 'POST' })
+        .catch(function() {})
+        .finally(function() {
+          setTimeout(function() { if (btn) btn.disabled = false; }, 800);
+        });
+    });
+  }
 
   // Show/hide a ✕ next to each [data-search-input] field based on whether
   // it's empty, and clear it on click. Forms tagged data-clear-on-submit
