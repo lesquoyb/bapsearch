@@ -1050,6 +1050,24 @@
       var panel = document.getElementById('results-panel');
       if (!panel) return;
 
+      // Race recovery: on a fresh conversation page, the SSE 'results' event
+      // can fire before this client has subscribed (SearXNG returns before
+      // the redirect target finishes loading). In that case the panel stays
+      // stuck on "Fetching results…" forever. If we see a card event but no
+      // cards have been rendered yet, re-fetch the results endpoint.
+      if (!panel.querySelector('.result-card')) {
+        var resultsUrl = body.dataset.resultsUrl;
+        if (resultsUrl && !panel.dataset.bapRecovering) {
+          panel.dataset.bapRecovering = '1';
+          fetch(resultsUrl).then(function(r) { return r.text(); }).then(function(html) {
+            panel.innerHTML = html;
+            bapApplyResultsLimit(panel);
+            delete panel.dataset.bapRecovering;
+          }).catch(function() { delete panel.dataset.bapRecovering; });
+        }
+        return;
+      }
+
       var card = panel.querySelector('[data-url="' + CSS.escape(url) + '"]');
       if (!card) return;
 
@@ -1125,6 +1143,23 @@
     es.addEventListener('pipeline', function(e) {
       var data;
       try { data = JSON.parse(e.data); } catch(_) { return; }
+
+      // Race recovery: if the pipeline has moved past "searching" but the
+      // results panel is still empty, the initial 'results' SSE event was
+      // missed (subscriber subscribed too late). Trigger a results refetch.
+      var panel = document.getElementById('results-panel');
+      if (panel && !panel.querySelector('.result-card') && data.status &&
+          data.status !== 'searching' && data.status !== 'pending') {
+        var resultsUrl = body.dataset.resultsUrl;
+        if (resultsUrl && !panel.dataset.bapRecovering) {
+          panel.dataset.bapRecovering = '1';
+          fetch(resultsUrl).then(function(r) { return r.text(); }).then(function(html) {
+            panel.innerHTML = html;
+            bapApplyResultsLimit(panel);
+            delete panel.dataset.bapRecovering;
+          }).catch(function() { delete panel.dataset.bapRecovering; });
+        }
+      }
 
       var statusEl = document.getElementById('proc-status');
       if (statusEl) statusEl.textContent = data.status || '';
