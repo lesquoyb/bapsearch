@@ -152,6 +152,7 @@ type llamaEmbeddingRequest struct {
 
 type llamaEmbeddingResponse struct {
 	Data []struct {
+		Index     int       `json:"index"`
 		Embedding []float64 `json:"embedding"`
 	} `json:"data"`
 	Embedding []float64 `json:"embedding"`
@@ -593,6 +594,122 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
 	return vector, nil
+}
+
+// EmbedTexts embeds several inputs in a single HTTP request. Returns one
+// vector per input in the same order. Each text is truncated to
+// maxEmbeddingTokens, exactly like EmbedText. Empty inputs are not allowed —
+// the caller is expected to filter beforehand.
+func (service *LLMService) EmbedTexts(ctx context.Context, meta RequestMeta, texts []string) ([][]float64, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	if len(texts) == 1 {
+		v, err := service.EmbedText(ctx, meta, texts[0])
+		if err != nil {
+			return nil, err
+		}
+		return [][]float64{v}, nil
+	}
+
+	inputs := make([]string, 0, len(texts))
+	for _, t := range texts {
+		trimmed := strings.TrimSpace(t)
+		if trimmed == "" {
+			return nil, fmt.Errorf("cannot embed empty text in batch")
+		}
+		inputs = append(inputs, service.truncateToTokens(ctx, trimmed, service.maxEmbeddingTokens))
+	}
+
+	payload := llamaEmbeddingRequest{Input: inputs, Model: "local"}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := strings.TrimSpace(service.embeddingsURL)
+	if endpoint == "" {
+		return nil, fmt.Errorf("embeddings endpoint is not configured")
+	}
+
+	started := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := service.client.Do(req)
+	if err != nil {
+		service.llm().Error("embedding_batch_request_failed",
+			"timestamp", time.Now().UTC().Format(time.RFC3339),
+			"request_id", meta.RequestID,
+			"user_id", meta.UserID,
+			"conversation_id", meta.ConversationID,
+			"endpoint", endpoint,
+			"batch_size", len(inputs),
+			"duration_ms", time.Since(started).Milliseconds(),
+			"error", err.Error(),
+		)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		service.llm().Error("embedding_batch_request_status",
+			"timestamp", time.Now().UTC().Format(time.RFC3339),
+			"request_id", meta.RequestID,
+			"user_id", meta.UserID,
+			"conversation_id", meta.ConversationID,
+			"endpoint", endpoint,
+			"batch_size", len(inputs),
+			"status_code", resp.StatusCode,
+			"body", string(responseBody),
+		)
+		return nil, fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	var payloadResponse llamaEmbeddingResponse
+	if err := json.Unmarshal(responseBody, &payloadResponse); err != nil {
+		return nil, err
+	}
+	if len(payloadResponse.Data) == 0 {
+		return nil, fmt.Errorf("embedding endpoint returned no vectors for batch of %d", len(inputs))
+	}
+
+	// llama.cpp returns data sorted but the spec says we should honour the
+	// "index" field. Reorder defensively so callers can map by position.
+	vectors := make([][]float64, len(inputs))
+	for _, item := range payloadResponse.Data {
+		idx := item.Index
+		if idx < 0 || idx >= len(inputs) {
+			continue
+		}
+		vectors[idx] = item.Embedding
+	}
+	totalDim := 0
+	for i, v := range vectors {
+		if len(v) == 0 {
+			return nil, fmt.Errorf("embedding endpoint returned no vector for input %d", i)
+		}
+		totalDim = len(v)
+	}
+
+	service.llm().Info("embedding_batch_response",
+		"timestamp", time.Now().UTC().Format(time.RFC3339),
+		"request_id", meta.RequestID,
+		"user_id", meta.UserID,
+		"conversation_id", meta.ConversationID,
+		"endpoint", endpoint,
+		"batch_size", len(inputs),
+		"vector_dim", totalDim,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+	return vectors, nil
 }
 
 func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onReasoning func(string)) (string, error) {

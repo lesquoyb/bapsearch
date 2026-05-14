@@ -262,8 +262,56 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 	// Track which URLs were fetched to detect failures afterwards.
 	fetched := make(map[string]bool)
 
+	// Buffer ready-to-embed documents up to embeddingBatchSize then flush them
+	// in a single HTTP call. With batch size 1 (the default) this stays
+	// strictly one-at-a-time, identical to the previous behaviour.
+	batchSize := service.llm.embeddingBatchSize
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	type pendingEmbed struct {
+		url  string
+		text string
+	}
+	pending := make([]pendingEmbed, 0, batchSize)
+
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		texts := make([]string, len(pending))
+		for i, p := range pending {
+			texts[i] = p.text
+		}
+		vectors, err := service.llm.EmbedTexts(ctx, meta, texts)
+		if err != nil {
+			logger.Error("batch embedding failed", "batch_size", len(pending), "error", err)
+			for _, p := range pending {
+				service.updateSummaryStatus(ctx, logger, conversationID, p.url, "error", err.Error())
+			}
+			pending = pending[:0]
+			return
+		}
+		for i, p := range pending {
+			embeddingJSON, err := json.Marshal(vectors[i])
+			if err != nil {
+				logger.Error("embedding serialization failed", "url", p.url, "error", err)
+				service.updateSummaryStatus(ctx, logger, conversationID, p.url, "error", err.Error())
+				continue
+			}
+			if err := service.conversations.UpdateDocumentEmbedding(ctx, conversationID, p.url, string(embeddingJSON)); err != nil {
+				logger.Error("storing document embedding failed", "url", p.url, "error", err)
+				service.updateSummaryStatus(ctx, logger, conversationID, p.url, "error", err.Error())
+				continue
+			}
+		}
+		pending = pending[:0]
+	}
+
 	// Process each document as soon as it arrives: store source text immediately
-	// (making hover-card content visible) then compute and store the embedding.
+	// (making hover-card content visible) then queue the embedding for batched
+	// computation. The batch is flushed when full OR when the fetch channel
+	// closes (handled by the defer-style call after the loop).
 	for document := range docCh {
 		fetched[document.URL] = true
 
@@ -295,26 +343,13 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 		service.events.Publish(conversationID, "card", CardEvent{URL: document.URL, SourceText: document.Text})
 
 		service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "embedding", "Generating document embeddings.")
-		embedding, err := service.llm.EmbedText(ctx, meta, document.Text)
-		if err != nil {
-			logger.Error("document embedding failed", "url", document.URL, "error", err)
-			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
-			continue
-		}
-
-		embeddingJSON, err := json.Marshal(embedding)
-		if err != nil {
-			logger.Error("embedding serialization failed", "url", document.URL, "error", err)
-			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
-			continue
-		}
-
-		if err := service.conversations.UpdateDocumentEmbedding(ctx, conversationID, document.URL, string(embeddingJSON)); err != nil {
-			logger.Error("storing document embedding failed", "url", document.URL, "error", err)
-			service.updateSummaryStatus(ctx, logger, conversationID, document.URL, "error", err.Error())
-			continue
+		pending = append(pending, pendingEmbed{url: document.URL, text: document.Text})
+		if len(pending) >= batchSize {
+			flush()
 		}
 	}
+	// Flush any partial batch left over once the fetch channel closes.
+	flush()
 
 	for _, result := range results {
 		if !fetched[result.URL] {
