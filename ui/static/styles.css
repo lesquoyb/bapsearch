@@ -386,6 +386,21 @@ progress {
   text-align: center;
 }
 
+.starter-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.starter-preset-card h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.starter-preset-card form {
+  margin-top: 10px;
+}
+
 .search-clear-btn {
   font-size: 0.85rem;
   line-height: 1;

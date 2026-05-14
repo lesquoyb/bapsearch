@@ -6,6 +6,110 @@ import (
 	"strings"
 )
 
+// StarterPreset bundles a recommended set of parameters for a given hardware
+// tier. Applying a preset writes these into the settings table; model
+// selection is left to the user (their list depends on what they have
+// downloaded), but the description points at sensible defaults.
+type StarterPreset struct {
+	ID          string
+	Title       string
+	Description string
+	ModelHint   string
+	Values      map[string]string
+}
+
+var starterPresets = []StarterPreset{
+	{
+		ID:          "cpu",
+		Title:       "CPU only (no GPU / integrated)",
+		Description: "Smallest models, short context, no reasoning, low concurrency. The answer model runs entirely on CPU.",
+		ModelHint:   "Suggested: Qwen2.5-1.5B-Instruct Q4_K_M for the answer model, nomic-embed-text-v1.5 (or bge-small) for embeddings.",
+		Values: map[string]string{
+			"temperature": "0.2", "top_p": "1.0", "top_k": "40",
+			"max_tokens":           "512",
+			"enable_thinking":      "false",
+			"max_embedding_tokens": "256",
+			"embedding_batch_size": "1",
+			"summarize_url_limit":  "2",
+			"fetch_workers":        "2",
+		},
+	},
+	{
+		ID:          "low_gpu",
+		Title:       "Entry GPU (≈4 GB VRAM)",
+		Description: "Small models with a usable context. Reasoning off to keep latency down. One-doc-at-a-time embeddings.",
+		ModelHint:   "Suggested: Qwen2.5-3B-Instruct Q4_K_M, bge-small for embeddings (under 100 MB VRAM).",
+		Values: map[string]string{
+			"temperature": "0.2", "top_p": "1.0", "top_k": "40",
+			"max_tokens":           "1024",
+			"enable_thinking":      "false",
+			"max_embedding_tokens": "500",
+			"embedding_batch_size": "2",
+			"summarize_url_limit":  "3",
+			"fetch_workers":        "3",
+		},
+	},
+	{
+		ID:          "consumer_gpu",
+		Title:       "Consumer GPU (8–24 GB VRAM)",
+		Description: "Mid-size answer model with reasoning enabled, batched embeddings, more sources per query.",
+		ModelHint:   "Suggested: Qwen3-7B-Instruct or Qwen2.5-7B-Instruct Q4_K_M, bge-large or e5-large for embeddings.",
+		Values: map[string]string{
+			"temperature": "0.2", "top_p": "1.0", "top_k": "40",
+			"max_tokens":           "2048",
+			"enable_thinking":      "true",
+			"reasoning_budget":     "2048",
+			"max_embedding_tokens": "1024",
+			"embedding_batch_size": "4",
+			"summarize_url_limit":  "5",
+			"fetch_workers":        "4",
+		},
+	},
+	{
+		ID:          "server",
+		Title:       "Workstation / server (48 GB+ VRAM)",
+		Description: "Large models, deep reasoning budget, aggressive batching, lots of sources.",
+		ModelHint:   "Suggested: Qwen2.5-32B-Instruct or DeepSeek-R1-Distill-Qwen-32B, bge-m3 or jina-embeddings-v3 for embeddings.",
+		Values: map[string]string{
+			"temperature": "0.2", "top_p": "1.0", "top_k": "40",
+			"max_tokens":           "4096",
+			"enable_thinking":      "true",
+			"reasoning_budget":     "4096",
+			"max_embedding_tokens": "2048",
+			"embedding_batch_size": "8",
+			"summarize_url_limit":  "8",
+			"fetch_workers":        "8",
+		},
+	},
+}
+
+// handleSettingsPreset applies one of the starter presets and redirects back
+// to /settings?status=preset-<id>.
+func (app *App) handleSettingsPreset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("preset"))
+	var preset *StarterPreset
+	for i := range starterPresets {
+		if starterPresets[i].ID == name {
+			preset = &starterPresets[i]
+			break
+		}
+	}
+	if preset == nil {
+		http.Error(w, "unknown preset", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	for k, v := range preset.Values {
+		_ = app.conversations.SetSetting(ctx, k, v)
+	}
+	app.loadSettingsFromDB()
+	http.Redirect(w, r, "/settings?status=preset+"+preset.ID+"+applied", http.StatusSeeOther)
+}
+
 // handleSettingsPage serves GET /settings. POST is delegated to handleSettingsSave.
 func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
@@ -61,6 +165,7 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		EmbeddingModel: settings["embedding_model"],
 		Status:         r.URL.Query().Get("status"),
 		Settings:       settings,
+		StarterPresets: starterPresets,
 		Prompts: map[string]string{
 			"prompt_chat":   c,
 			"prompt_memory": m,

@@ -86,6 +86,7 @@ type PageData struct {
 	Prompts        map[string]string
 	Settings       map[string]string // <-- expose all settings for the template
 	UserMemory     string
+	StarterPresets []StarterPreset
 }
 
 func main() {
@@ -526,6 +527,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("/search", app.handleSearch)
 	mux.HandleFunc("/conversations/", app.handleConversationRoutes)
 	mux.HandleFunc("/settings", app.handleSettingsPage)
+	mux.HandleFunc("/settings/preset", app.handleSettingsPreset)
 	mux.HandleFunc("/settings/download", app.handleModelDownload)
 	mux.HandleFunc("/settings/download-status", app.handleModelDownloadStatus)
 	mux.HandleFunc("/memory", app.handleMemoryPage)

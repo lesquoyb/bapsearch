@@ -12,6 +12,29 @@
       </div>
     </section>
 
+    {{ if .StarterPresets }}
+    <section class="section-block">
+      <div class="section-header"><div>
+        <div class="eyebrow">Starter presets</div>
+        <h2>Recommended parameters for your hardware</h2>
+        <p class="muted">One-click defaults for common setups. Applies temperature, max-tokens, reasoning, embedding budget, batch size, fetch concurrency, and source count. Model selection is left to you (depends on what you have downloaded).</p>
+      </div></div>
+      <div class="starter-preset-grid">
+        {{ range .StarterPresets }}
+        <article class="card starter-preset-card">
+          <h3>{{ .Title }}</h3>
+          <p class="muted">{{ .Description }}</p>
+          <p class="muted"><em>{{ .ModelHint }}</em></p>
+          <form action="/settings/preset" method="post">
+            <input type="hidden" name="preset" value="{{ .ID }}">
+            <button type="submit" class="ghost-button">Apply preset</button>
+          </form>
+        </article>
+        {{ end }}
+      </div>
+    </section>
+    {{ end }}
+
     <form class="stack-form" action="/settings" method="post">
       <!-- Models -->
       <section class="section-block">
