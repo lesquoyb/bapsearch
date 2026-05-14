@@ -71,7 +71,28 @@
     bapInitEngineOverflow();
     bapMovePillsIntoMessages(document);
     bapInitFloatingPopovers();
+    bapInitSearchClearButtons();
   });
+
+  // Show/hide a ✕ next to each [data-search-input] field based on whether
+  // it's empty, and clear it on click. Forms tagged data-clear-on-submit
+  // also wipe the field after submit so the next visit to the page starts
+  // clean (useful on the conversation page where the query stays prefilled).
+  function bapInitSearchClearButtons() {
+    document.querySelectorAll('[data-search-input]').forEach(function(input) {
+      var form = input.closest('form');
+      var clearBtn = form ? form.querySelector('[data-search-clear]') : null;
+      if (!clearBtn) return;
+      function sync() { clearBtn.hidden = !input.value; }
+      input.addEventListener('input', sync);
+      clearBtn.addEventListener('click', function() {
+        input.value = '';
+        sync();
+        input.focus();
+      });
+      sync();
+    });
+  }
 
   // Position .source-summary-popover bubbles in viewport space so they escape
   // overflow:hidden ancestors (results panel, split column, …). Triggered on

@@ -378,6 +378,26 @@ progress {
   text-align: center;
 }
 
+.search-clear-btn {
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.35rem 0.55rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.search-clear-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.search-clear-btn[hidden] {
+  display: none;
+}
+
 #pipeline-progress {
   margin: 0.5rem 0 0.75rem;
   display: flex;
