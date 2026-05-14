@@ -424,6 +424,12 @@ func (app *App) loadSettingsFromDB() {
 			app.llm.embeddingBatchSize = n
 		}
 	}
+	if v := app.conversations.GetSetting(ctx, "query_reformulations", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			app.cfg.QueryReformulations = n
+			app.summarize.queryReformulations = n
+		}
+	}
 
 	// Per-call-type sampling overrides. Each profile pulls three optional
 	// keys; zero/empty leaves the global temperature/top_p/top_k in effect.

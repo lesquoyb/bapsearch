@@ -5,16 +5,20 @@ Self-hosted conversational search engine for small machines. Combines SearXNG me
 ## What it does
 
 - Runs SearXNG internally on an isolated Docker network.
-- Returns raw search results immediately while the pipeline works in the background.
-- Optionally generates N query reformulations with the answer model (`BAP_QUERY_REFORMULATIONS`) and runs all variants against SearXNG in parallel, then merges and deduplicates results.
-- Fetches each result page, extracts clean text with trafilatura, generates embeddings, and reranks sources by cosine similarity.
+- Returns raw search results immediately while the pipeline works in the background, in their original SearXNG order. Cards reorder exactly once when ranking finishes — they no longer shuffle around as each URL progresses through fetch/embed.
+- A visible progress bar above the conversation shows the current pipeline phase and the ready/target ratio in real time.
+- A Stop button cancels every in-flight inference call (search, embed, rewrite, answer stream) for the active conversation.
+- Optionally generates N query reformulations with the answer model and runs all variants against SearXNG in parallel, then merges and deduplicates results. Configurable from `/settings` (falls back to `BAP_QUERY_REFORMULATIONS`).
+- Fetches each result page, extracts clean text with trafilatura, generates embeddings, and reranks sources by cosine similarity. Embeddings can be batched in a single HTTP call (`embedding_batch_size`).
 - Streams a grounded answer from the top-ranked sources with inline citations.
 - Supports iterative search: the model can request additional searches when it needs more information, with user confirmation.
 - Stores everything as threaded conversations with messages, results, summaries, and engine statuses.
 - Maintains persistent per-user memory that is automatically refreshed and reused across conversations.
 - Supports chain-of-thought reasoning with configurable budget (for models like Qwen3.5).
-- All parameters (LLM sampling, search depth, context limits, prompts) are editable from the settings page.
-- Logs structured JSON to a mounted volume.
+- All parameters (LLM sampling, search depth, context limits, prompts) are editable from the settings page, with one-click hardware-tier starter presets (CPU only / 4 GB GPU / consumer GPU / server).
+- Per-call-type sampling overrides (e.g. higher temperature for query rewriting, lower for grounded answers).
+- Partial relaunch: re-rank existing sources with a fresh query embedding, or re-run the whole search pipeline, without recreating the conversation.
+- Logs structured JSON to a mounted volume — two streams: `backend.jsonl` for general events, `llm.jsonl` for every LLM/embedding prompt, response, and API call.
 
 ## Stack
 
@@ -151,8 +155,8 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_SUMMARIZE_URL_LIMIT` | `3` | URLs to fetch & summarize per search |
 | `BAP_FETCH_WORKERS` | `3` | Concurrent page fetch workers |
 | `BAP_MAX_EXTRACT_CHARS` | `12000` | Max chars extracted per page |
-| `BAP_MAX_EMBEDDING_TOKENS` | `500` | Max tokens sent to embedding model |
-| `BAP_QUERY_REFORMULATIONS` | `0` | Number of query reformulations to generate (0 = disabled) |
+| `BAP_MAX_EMBEDDING_TOKENS` | `500` | Max tokens sent to embedding model. Overridable from `/settings`. |
+| `BAP_QUERY_REFORMULATIONS` | `0` | Number of query reformulations to generate (0 = disabled). Overridable from `/settings`. |
 | `BAP_CHAT_CONTEXT_CHARS` | `4200` | Conversation context for follow-ups |
 | `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
 | `BAP_SUMMARY_WORKERS` | `1` | Concurrent summary pipeline workers |
@@ -163,15 +167,20 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
 | `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama-embeddings:8080/v1/embeddings` | Embedding model endpoint |
 | `SEARXNG_SEARCH_URL` | `http://searxng:8080/search` | SearXNG search endpoint |
+| `BAP_LOG_PATH` | `/logs/backend.jsonl` | General structured log file |
+| `BAP_LLM_LOG_PATH` | `/logs/llm.jsonl` | Dedicated LLM trace log (every prompt, response, embedding call) |
 
 ### UI settings
 
 All of these are adjustable from the `/settings` page without restart:
 
+- **Starter presets** — one-click hardware-tier defaults: CPU only, ≈4 GB VRAM, consumer GPU, workstation/server. Each preset writes a coherent bundle of sampling, embedding, and concurrency settings; model selection stays the user's call.
 - **Model assignments** — answer and embedding model per role
 - **LLM sampling** — temperature, top-p, top-k, max tokens
+- **Per-call-type sampling overrides** — distinct temperature / top-p / top-k for query rewrites and utility calls (search-intent paragraphs, memory updates). Leave blank to inherit the global values.
 - **Reasoning** — enable/disable chain-of-thought, reasoning budget
-- **Search** — results per search, iterative search loops (default 3), URLs to summarize, max extract chars, fetch workers
+- **Embeddings** — max tokens per chunk, batch size (number of documents per HTTP call)
+- **Search** — query reformulations per search, iterative search loops (default 3), URLs to summarize, max extract chars, fetch workers
 - **Chat** — context chars, max messages in context
 - **Display** — results display limit, context doc count
 - **Prompts** — chat and memory prompts (fully editable)
@@ -191,9 +200,13 @@ All of these are adjustable from the `/settings` page without restart:
 | `POST` | `/conversations/{id}/search-more/stream` | SSE iterative search stream |
 | `POST` | `/conversations/{id}/force-answer/stream` | SSE force answer with current sources |
 | `POST` | `/conversations/{id}/summaries/regenerate` | Rebuild summaries from stored results |
+| `POST` | `/conversations/{id}/rerank` | Re-embed query and reorder sources (no re-fetch) |
+| `POST` | `/conversations/{id}/research` | Re-run the full search pipeline for this conversation |
+| `POST` | `/conversations/{id}/cancel` | Cancel every in-flight inference for this conversation |
 | `POST` | `/conversations/{id}/delete` | Delete conversation |
 | `GET` | `/settings` | Settings page |
 | `POST` | `/settings` | Save settings |
+| `POST` | `/settings/preset` | Apply a starter preset by id (cpu / low_gpu / consumer_gpu / server) |
 | `POST` | `/settings/download` | Download a GGUF model from URL |
 | `GET` | `/settings/download-status` | Poll model download progress |
 | `GET` | `/memory` | View/edit persistent user memory |
@@ -225,7 +238,7 @@ ui/
   templates/      HTML templates (layout, index, conversation, settings, memory, login, register)
   static/         CSS, favicon
 models/           GGUF model files + current-model pointers
-logs/             Structured JSON logs
+logs/             Structured JSON logs (backend.jsonl + llm.jsonl)
 docs/             Architecture, setup, auth, API, prompts, logging, security docs
 Makefile          Shortcuts for compose commands
 ```

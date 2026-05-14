@@ -24,9 +24,10 @@ Conversation view. Returns raw search results, summaries panel, and chat thread.
 
 SSE stream for real-time pipeline and card status updates. Sends current state immediately on connect, then pushes incremental events as the pipeline progresses. Event types:
 
-- `pipeline` — overall status (`status`, `detail`, `ready_count`, `target`)
+- `pipeline` — overall status (`status`, `detail`, `ready_count`, `target`, `progress` 0–100). `status` includes `searching`, `extracting`, `ranking`, `ready`, `cancelled`, `error`.
 - `card` — per-URL status, detail, source text, and similarity score
 - `results` — signals that new search results were stored (client should refresh results panel)
+- `reorder` — emitted exactly once after ranking finishes, carrying the URLs in their final similarity-ranked order. Clients should reorder cards in one pass (no shuffling during fetch/embed).
 - `close` — pipeline complete; client should reload the messages panel
 
 ### GET /conversations/{id}/results
@@ -40,6 +41,18 @@ Returns the current state of all summary jobs. Used for initial render only.
 ### POST /conversations/{id}/summaries/regenerate
 
 Discards existing summaries and re-runs the full fetch, extract, embed, and rerank pipeline from stored search results.
+
+### POST /conversations/{id}/rerank
+
+Cheap partial relaunch: re-embeds the conversation title with the current embedding model and reorders the existing pool of sources by cosine similarity. No fetch, no re-embedding of documents. Useful when tuning embedding parameters. Synchronous; returns `{"reranked": N}`.
+
+### POST /conversations/{id}/research
+
+Re-runs the full search pipeline for this conversation: fresh SearXNG queries (with new reformulations if enabled), dedup-append of any newly-discovered URLs, then fetch/embed/rerank. Existing cards stay in place. Returns `{"enqueued": true}`.
+
+### POST /conversations/{id}/cancel
+
+Cancels every in-flight context registered for this conversation: the background SummaryJob, the answer SSE stream, and any chat-message SSE stream. Returns `{"cancelled": N}` where N is the number of operations interrupted.
 
 ### GET /conversations/{id}/answer/stream
 
@@ -87,13 +100,25 @@ Saves the settings form.
 
 Form fields include:
 
-- `llm_model`, `rewrite_model`, `embedding_model`
+- `llm_model`, `embedding_model`
 - LLM sampling parameters (temperature, top_p, top_k, max_tokens)
-- Search pipeline parameters (summarize_url_limit, fetch_workers, context_doc_count, etc.)
-- Prompt fields (prompt_summarize, prompt_synthesize, prompt_chat, prompt_memory)
+- Per-call-type sampling overrides: `rewrite_temperature`, `rewrite_top_p`, `rewrite_top_k`, `utility_temperature` (leave blank to inherit globals)
+- Embedding parameters (`max_embedding_tokens`, `embedding_batch_size`)
+- Search pipeline parameters (`query_reformulations`, `summarize_url_limit`, `fetch_workers`, `context_doc_count`, etc.)
+- Prompt fields (prompt_chat, prompt_memory)
 - Reasoning settings (enable_thinking, reasoning_budget)
 
 Behavior: writes model assignments to the role-specific files in `/models`, stores remaining settings in SQLite, reloads in-memory prompts and settings.
+
+### POST /settings/preset
+
+Applies one of the hardware-tier starter presets. Writes a bundle of sampling, embedding, and concurrency defaults; does not touch model assignments.
+
+Form field:
+
+- `preset`: one of `cpu`, `low_gpu`, `consumer_gpu`, `server`
+
+Redirects back to `/settings?status=preset+<id>+applied`.
 
 ### POST /settings/download
 
@@ -155,7 +180,9 @@ Query parameter:
 
 Response fields:
 
-- `role`, `status` (`loaded`, `loading`, `error`), `expected_model`, `loaded_model`, `detail`
+- `role`, `status` (`loaded`, `loading`, `reloading`, `error`), `expected_model`, `loaded_model`, `detail`
+
+`reloading` is returned when llama.cpp is still serving the previous model while a new `current-<role>-model.txt` has been written — the UI uses it to show "Reloading…" with the expected model name.
 
 ## Internal upstreams
 

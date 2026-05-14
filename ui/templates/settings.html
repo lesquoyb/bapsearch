@@ -179,6 +179,12 @@
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
 
+          <label for="query_reformulations">Query reformulations per search</label>
+          <p class="muted">Number of alternative phrasings the answer model generates for each query, run in parallel against SearXNG and merged. 0 disables the feature. Higher values widen coverage at the cost of one extra LLM call and N extra SearXNG queries.</p>
+          <div class="setting-row">
+            <input type="number" step="1" min="0" max="8" id="query_reformulations" name="query_reformulations" value="{{ index .Settings "query_reformulations" }}" placeholder="fallback: env var (default 0)">
+          </div>
+
           <label for="summarize_url_limit">URLs to fetch per search</label>
           <p class="muted">Maximum number of top-ranked URLs whose content will be fetched and indexed per search. Higher values give richer context but take longer.</p>
           <div class="setting-row">
