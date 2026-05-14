@@ -157,22 +157,24 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
 | `BAP_SUMMARY_WORKERS` | `1` | Concurrent summary pipeline workers |
 | `BAP_CONTEXT_DOC_COUNT` | `5` | Top-ranked sources included in answer context |
+| `BAP_RESULTS_DISPLAY_LIMIT` | `10` | Max search result cards shown in the UI |
 | `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |
 | `BAP_LLM_CONTEXT_TOKENS` | `8192` | LLM context window size |
 | `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
 | `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama-embeddings:8080/v1/embeddings` | Embedding model endpoint |
+| `SEARXNG_SEARCH_URL` | `http://searxng:8080/search` | SearXNG search endpoint |
 
 ### UI settings
 
 All of these are adjustable from the `/settings` page without restart:
 
-- **Model assignments** — answer, rewrite, embedding model per role
+- **Model assignments** — answer and embedding model per role
 - **LLM sampling** — temperature, top-p, top-k, max tokens
 - **Reasoning** — enable/disable chain-of-thought, reasoning budget
-- **Search** — results per search, iterative search loops, URLs to summarize, max extract chars, fetch workers
-- **Embeddings** — similarity threshold
+- **Search** — results per search, iterative search loops (default 3), URLs to summarize, max extract chars, fetch workers
 - **Chat** — context chars, max messages in context
-- **Prompts** — summarize, synthesize, chat, and memory prompts (fully editable)
+- **Display** — results display limit, context doc count
+- **Prompts** — chat and memory prompts (fully editable)
 
 ## Core endpoints
 
@@ -193,6 +195,7 @@ All of these are adjustable from the `/settings` page without restart:
 | `GET` | `/settings` | Settings page |
 | `POST` | `/settings` | Save settings |
 | `POST` | `/settings/download` | Download a GGUF model from URL |
+| `GET` | `/settings/download-status` | Poll model download progress |
 | `GET` | `/memory` | View/edit persistent user memory |
 | `POST` | `/memory` | Save user memory |
 | `GET` | `/login` | Login page |
