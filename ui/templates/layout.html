@@ -87,7 +87,29 @@
       e.preventDefault();
       var btn = form.querySelector('button[type="submit"]');
       if (btn) btn.disabled = true;
+      // Make sure the live stream is open so the progress bar, status dots and
+      // reordering update in real time — even on a conversation that had
+      // already finished (and therefore had no SSE connection).
+      bapReconnectConversationEvents();
       fetch(form.action, { method: 'POST' })
+        .then(function() {
+          // Rerank publishes its events synchronously and may finish before the
+          // freshly-opened SSE connection is ready, so re-fetch the results
+          // panel directly to guarantee the new order/scores show. Harmless for
+          // re-search (the SSE stream keeps it updated afterwards).
+          var body = document.getElementById('conversation-body');
+          var panel = document.getElementById('results-panel');
+          if (body && panel && body.dataset.resultsUrl) {
+            bapSaveHoveredResult(panel);
+            return fetch(body.dataset.resultsUrl)
+              .then(function(r) { return r.text(); })
+              .then(function(html) {
+                panel.innerHTML = html;
+                bapApplyResultsLimit(panel);
+                bapRestoreHoveredResult(panel);
+              });
+          }
+        })
         .catch(function() {})
         .finally(function() {
           setTimeout(function() { if (btn) btn.disabled = false; }, 800);
@@ -229,7 +251,6 @@
     var arrow = divider.querySelector('.layout-divider-arrow');
     // In split: arrow → means "push chat right to hide it" (go to expanded)
     // In expanded: divider is hidden anyway, but arrow ← means "pull chat back"
-    if (arrow) arrow.style.content = ''; // reset; CSS ::after handles it
     divider.title = isExpanded ? 'Show answer' : 'Hide answer';
     if (arrow) {
       // › = push right (split→expanded), ‹ = pull left (expanded→split, not visible)
@@ -264,7 +285,24 @@
     bapSetLayout('split');
   }
 
-  document.addEventListener('DOMContentLoaded', function() { bapUpdateToggleButton(); });
+  // Re-apply the user's manual split/expanded choice when a conversation is
+  // (re)opened. The server only renders the *default* layout (split once an
+  // answer exists, expanded otherwise); without this the per-conversation
+  // preference saved by bapToggleLayout was silently dropped on every reload.
+  function bapRestoreLayout() {
+    var body = document.getElementById('conversation-body');
+    if (!body) return;
+    var override = null;
+    try { override = sessionStorage.getItem(bapLayoutKey()); } catch(e) {}
+    if (override === 'split' || override === 'expanded') {
+      bapSetLayout(override);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    bapRestoreLayout();
+    bapUpdateToggleButton();
+  });
 
   function bapStartContinuationStream(basePath, url, formData, chatMessages, refreshUrl) {
     var limitThread = chatMessages.querySelector('.search-limit-thread');
@@ -1057,6 +1095,9 @@
       if (!hover) return;
       if (a && a.href === window._bapHoveredUrl) {
         hover.classList.add('source-hover--pinned');
+        // The popover is position:fixed and only gets its coordinates on hover;
+        // a freshly-swapped node would otherwise flash at (0,0). Position it now.
+        bapPositionPopover(hover);
       }
     });
   }
@@ -1085,12 +1126,19 @@
   }
 
   // ── SSE: real-time card / pipeline updates ────────────────────────────────
+  // Single live connection per page. Tracked so a reconnect (after rerank /
+  // re-search) can tear down the previous stream instead of stacking a second
+  // EventSource on top of it.
+  var bapES = null;
+
   function bapInitConversationEvents(body) {
     var eventsUrl = body.dataset.eventsUrl;
     if (!eventsUrl) return;
     if (body.dataset.done === 'true') return; // already complete on page load
 
+    if (bapES) { try { bapES.close(); } catch (e) {} bapES = null; }
     var es = new EventSource(eventsUrl);
+    bapES = es;
 
     // Wire the Stop button to POST /cancel. Any in-flight pipeline job,
     // answer stream, or chat message stream registered with the backend
@@ -1264,13 +1312,18 @@
       var counts = document.getElementById('pipeline-progress-counts');
       if (bar && fill) {
         bar.hidden = false;
+        // "complete" is the terminal status the server stores once an answer
+        // exists; treat it like "ready" so a reconnect (e.g. after rerank) on a
+        // finished conversation fills the bar instead of leaving it stuck.
+        var isDone = data.status === 'ready' || data.status === 'complete';
         var pct = typeof data.progress === 'number' ? data.progress : 0;
+        if (isDone && !pct) pct = 100;
         if (pct < 0) pct = 0; if (pct > 100) pct = 100;
         fill.style.width = pct + '%';
         fill.classList.toggle('is-error', data.status === 'error');
         if (phase) phase.textContent = data.status || '';
         if (counts) counts.textContent = (data.ready_count || 0) + '/' + (data.target || 0);
-        if (data.status === 'ready' || data.status === 'error') {
+        if (isDone || data.status === 'error') {
           // Let the user see the fill complete, then fade the bar out.
           setTimeout(function() { bar.hidden = true; }, 1200);
         }
@@ -1279,6 +1332,7 @@
 
     es.addEventListener('close', function() {
       es.close();
+      if (bapES === es) bapES = null;
       body.dataset.done = 'true';
 
       // Hide the processing capsule
@@ -1302,6 +1356,25 @@
       // Reconnect is automatic with EventSource; just log.
       console.warn('[bapsearch] SSE connection error, browser will retry');
     };
+  }
+
+  // Re-open the live event stream after a partial relaunch (rerank / re-search)
+  // on an already-completed conversation. Such conversations load with
+  // data-done="true", so bapInitConversationEvents never subscribed and the
+  // pipeline/card/reorder events fired into the void — the user saw nothing
+  // happen until a manual reload. Resetting the done flag + revealing the
+  // progress UI before re-subscribing restores live feedback.
+  function bapReconnectConversationEvents() {
+    var body = document.getElementById('conversation-body');
+    if (!body) return;
+    body.dataset.done = 'false';
+    // Reveal the progress bar — it is self-clearing (fades on the terminal
+    // "ready"/"complete" pipeline event). We deliberately leave the chat-header
+    // "Processing sources…" capsule alone: rerank/re-search never emit a "close"
+    // event, so showing it here would strand its spinner.
+    var bar = document.getElementById('pipeline-progress');
+    if (bar) bar.hidden = false;
+    bapInitConversationEvents(body);
   }
 
   document.addEventListener('DOMContentLoaded', function() {
