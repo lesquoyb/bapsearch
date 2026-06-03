@@ -62,10 +62,19 @@ Targeting all three axes; conservative, settings/presets still respected.
   `ctx-size` (2048) so inputs up to the configured `max_embedding_tokens`
   (incl. the 1024/2048 presets) actually fit, with a comment explaining the
   relationship.
+- **Two-stage worker pipeline (R5).** Split into a fast, network-bound **search
+  stage** (`BAP_SEARCH_WORKERS`, default 4) that publishes raw results and hands
+  off to a **process stage** (`BAP_SUMMARY_WORKERS`, default 1) doing the
+  LLM-bound fetch/embed/rank. A new search no longer queues behind another
+  conversation's heavy processing (`summarize.go`, `main.go`).
+- **Faster-by-default knobs (R7, R8).** `enable_thinking` defaults **off** (the
+  capable presets still turn it on), so answers skip chain-of-thought; and
+  `max_extract_chars` drops 12000→6000 (the answer already truncates each source
+  to ~3000 chars, so 6000 keeps full answer context while trimming wasted
+  extraction/storage).
 
-Deferred (still in the plan below): R5 (worker split), R6 (batch-size default —
-presets already set it per tier), R7 (`enable_thinking` default — presets set it
-per tier), R8 (`max_extract_chars`), R9 (trafilatura service), R10 (UTF‑8 cut).
+Deferred: R6 (embedding batch-size default — presets already set it per tier),
+R9 (trafilatura as a long-lived service), R10 (UTF‑8-safe extract cut).
 
 ---
 

@@ -40,6 +40,7 @@ type Config struct {
 	MaxExtractChars      int
 	MaxEmbeddingTokens    int
 	FetchWorkers         int
+	SearchWorkers        int
 	SummaryWorkers       int
 	SummaryQueueSize     int
 	ContextDocCount      int
@@ -64,7 +65,8 @@ type App struct {
 	conversations *ConversationService
 	memory        *MemoryService
 	summarize     *SummarizeService
-	summaryJobs   chan SummaryJob
+	searchJobs    chan SummaryJob
+	processJobs   chan ProcessJob
 	events        *EventBroker
 	cancellations *Cancellations
 
@@ -264,7 +266,7 @@ func main() {
 		contextTokens:     cfg.LLMContextTokens,
 		maxEmbeddingTokens: cfg.MaxEmbeddingTokens,
 		embeddingBatchSize: 1,
-		enableThinking:    true,
+		enableThinking:    false,
 		reasoningBudget:   2048,
 		temperature:       0.2,
 		topP:              1.0,
@@ -299,12 +301,13 @@ func main() {
 		conversations: conversations,
 		memory:        memoryService,
 		summarize:     summarizeService,
-		summaryJobs:   make(chan SummaryJob, cfg.SummaryQueueSize),
+		searchJobs:    make(chan SummaryJob, cfg.SummaryQueueSize),
+		processJobs:   make(chan ProcessJob, cfg.SummaryQueueSize),
 		events:        eventBroker,
 		cancellations: cancellations,
 	}
 
-	app.summarize.StartWorkers(app.summaryJobs, cfg.SummaryWorkers)
+	app.summarize.StartWorkers(app.searchJobs, app.processJobs, cfg.SearchWorkers, cfg.SummaryWorkers)
 	app.loadPromptsFromDB()
 	app.loadSettingsFromDB()
 
@@ -702,9 +705,10 @@ func loadConfig() Config {
 		LLMLogsPath:          envOrDefault("BAP_LLM_LOG_PATH", "/logs/llm.jsonl"),
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
-		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 12000),
+		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 6000),
 		MaxEmbeddingTokens:    envOrDefaultInt("BAP_MAX_EMBEDDING_TOKENS", 500),
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
+		SearchWorkers:        envOrDefaultInt("BAP_SEARCH_WORKERS", 4),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
 		ContextDocCount:      envOrDefaultInt("BAP_CONTEXT_DOC_COUNT", 5),
