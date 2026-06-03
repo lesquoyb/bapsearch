@@ -150,7 +150,7 @@
         </div></div>
         <article class="card">
           <label class="checkbox-label">
-            <input type="checkbox" id="enable_thinking" name="enable_thinking" value="true" {{ if eq (index .Settings "enable_thinking") "true" }}checked{{ end }} data-default="true">
+            <input type="checkbox" id="enable_thinking" name="enable_thinking" value="true" {{ if eq (index .Settings "enable_thinking") "true" }}checked{{ end }} data-default="false">
             Enable reasoning mode
             <button type="button" class="reset-btn" onclick="resetCheckbox(this)" title="Reset to default">↻</button>
           </label>
@@ -195,7 +195,7 @@
           <label for="max_extract_chars">Max chars extracted per page</label>
           <p class="muted">Character limit for text extracted from each web page. Larger values capture more detail but may exceed the model's context window.</p>
           <div class="setting-row">
-            <input type="number" step="100" min="1000" max="100000" id="max_extract_chars" name="max_extract_chars" value="{{ index .Settings "max_extract_chars" }}" data-default="12000">
+            <input type="number" step="100" min="1000" max="100000" id="max_extract_chars" name="max_extract_chars" value="{{ index .Settings "max_extract_chars" }}" data-default="6000">
             <button type="button" class="reset-btn" onclick="resetField(this)" title="Reset to default">↻</button>
           </div>
 

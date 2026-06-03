@@ -163,7 +163,7 @@ func (app *App) startSearch(w http.ResponseWriter, r *http.Request, query string
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("initializing answer status failed", "error", err)
 	}
 
-	app.summaryJobs <- SummaryJob{
+	app.searchJobs <- SummaryJob{
 		ConversationID: conversationID,
 		UserID:         meta.UserID,
 		Query:          query,
@@ -306,7 +306,7 @@ func (app *App) handleConversationResearch(w http.ResponseWriter, r *http.Reques
 	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "searching", "Re-running the search pipeline."); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("research status init failed", "error", err)
 	}
-	app.summaryJobs <- SummaryJob{
+	app.searchJobs <- SummaryJob{
 		ConversationID: conversationID,
 		UserID:         meta.UserID,
 		Query:          conversation.Title,
@@ -444,7 +444,7 @@ func (app *App) handleConversationRegenerateSummaries(w http.ResponseWriter, r *
 	}
 	app.fetch.Invalidate(urls)
 
-	app.summaryJobs <- SummaryJob{
+	app.processJobs <- ProcessJob{
 		ConversationID: conversationID,
 		UserID:         meta.UserID,
 		Query:          conversation.Title,
