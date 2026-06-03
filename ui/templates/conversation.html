@@ -85,13 +85,19 @@
               </div>
             </div>
             <form action="/conversations/{{ .Conversation.ID }}/rerank" method="post" data-async-action>
-              <button class="ghost-button icon-button" type="submit" title="Re-embed the query and reorder sources without re-fetching" aria-label="Rerank only">⇅</button>
+              <button class="ghost-button section-action-btn" type="submit" title="Re-embed the query and reorder the existing sources — no new fetch" aria-label="Reorder sources">
+                <span class="section-action-icon" aria-hidden="true">⇅</span><span class="section-action-label">Reorder</span>
+              </button>
             </form>
             <form action="/conversations/{{ .Conversation.ID }}/research" method="post">
-              <button class="ghost-button icon-button" type="submit" title="Re-run the full search pipeline (new SearXNG queries) and regenerate the answer from the refreshed sources" aria-label="Re-search">⟲</button>
+              <button class="ghost-button section-action-btn" type="submit" title="Run a fresh web search (new SearXNG queries) and regenerate the answer from the new sources" aria-label="New web search">
+                <span class="section-action-icon" aria-hidden="true">⟲</span><span class="section-action-label">New search</span>
+              </button>
             </form>
             <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
-              <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
+              <button class="ghost-button section-action-btn" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Rebuild summaries">
+                <span class="section-action-icon" aria-hidden="true">↻</span><span class="section-action-label">Rebuild</span>
+              </button>
             </form>
             <small title="Current answer model">{{ if .CurrentModel }}◦ {{ .CurrentModel }}{{ else }}◦ No model selected{{ end }}</small>
           </div>

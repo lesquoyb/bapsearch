@@ -795,19 +795,40 @@ textarea {
   justify-content: space-between;
   align-items: end;
   gap: 16px;
+  row-gap: 10px;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .section-header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
   flex-shrink: 0;
 }
 
 .section-header-actions .ghost-button {
   padding: 7px 14px;
   font-size: 0.85rem;
+}
+
+/* Labelled relaunch actions (Reorder / New search / Rebuild). Icon + word so
+   the three near-identical circular-arrow glyphs are finally distinguishable;
+   the header wraps them onto a second line when the chat column is narrow. */
+.section-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.section-action-icon {
+  font-size: 0.98rem;
+  line-height: 1;
 }
 
 .section-header-actions form {
