@@ -9,15 +9,17 @@
       <div class="conversation-hero-title">
         <h1>{{ .Conversation.Title }}</h1>
       </div>
+      <!-- Standalone delete form: kept OUT of the search form (nested forms are
+           invalid HTML and made the trash button submit the search instead).
+           The button below is wired to it via the form= attribute. -->
+      <form id="conversation-hero-delete" action="/conversations/{{ .Conversation.ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');" hidden></form>
       <form class="conversation-hero-search" action="/search" method="post" data-submit-loading data-clear-on-submit>
         <label for="q" class="sr-only">Start another search</label>
         <div class="search-row">
           <input id="q" name="q" type="search" value="{{ .Conversation.Title }}" required data-search-input>
           <button type="button" class="ghost-button icon-button search-clear-btn" data-search-clear title="Clear the search field" aria-label="Clear search" hidden>✕</button>
           <button type="submit" data-loading-label="…">Search</button>
-          <form action="/conversations/{{ .Conversation.ID }}/delete" method="post" onsubmit="return window.confirm('Delete this conversation and all its stored results?');">
-            <button class="ghost-button danger-button icon-button" type="submit" title="Delete this conversation" aria-label="Delete conversation">🗑️</button>
-          </form>
+          <button type="submit" form="conversation-hero-delete" class="ghost-button danger-button icon-button" title="Delete this conversation" aria-label="Delete conversation">🗑️</button>
         </div>
         <div class="submit-indicator" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
@@ -83,13 +85,19 @@
               </div>
             </div>
             <form action="/conversations/{{ .Conversation.ID }}/rerank" method="post" data-async-action>
-              <button class="ghost-button icon-button" type="submit" title="Re-embed the query and reorder sources without re-fetching" aria-label="Rerank only">⇅</button>
+              <button class="ghost-button section-action-btn" type="submit" title="Re-embed the query and reorder the existing sources — no new fetch" aria-label="Reorder sources">
+                <span class="section-action-icon" aria-hidden="true">⇅</span><span class="section-action-label">Reorder</span>
+              </button>
             </form>
-            <form action="/conversations/{{ .Conversation.ID }}/research" method="post" data-async-action>
-              <button class="ghost-button icon-button" type="submit" title="Re-run the full search pipeline (new SearXNG queries, fresh reformulations)" aria-label="Re-search">⟲</button>
+            <form action="/conversations/{{ .Conversation.ID }}/research" method="post">
+              <button class="ghost-button section-action-btn" type="submit" title="Run a fresh web search (new SearXNG queries) and regenerate the answer from the new sources" aria-label="New web search">
+                <span class="section-action-icon" aria-hidden="true">⟲</span><span class="section-action-label">New search</span>
+              </button>
             </form>
             <form action="/conversations/{{ .Conversation.ID }}/summaries/regenerate" method="post">
-              <button class="ghost-button icon-button" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Regenerate summary">↻</button>
+              <button class="ghost-button section-action-btn" type="submit" title="Reset all summaries and rebuild them from the stored raw results" aria-label="Rebuild summaries">
+                <span class="section-action-icon" aria-hidden="true">↻</span><span class="section-action-label">Rebuild</span>
+              </button>
             </form>
             <small title="Current answer model">{{ if .CurrentModel }}◦ {{ .CurrentModel }}{{ else }}◦ No model selected{{ end }}</small>
           </div>

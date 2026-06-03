@@ -285,6 +285,24 @@ func (app *App) handleConversationResearch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "failed to load conversation", http.StatusInternalServerError)
 		return
 	}
+	// Drop the current grounded overview so the fresh-load answer stream
+	// regenerates it from the refreshed source pool — but only when it is the
+	// sole assistant message. If follow-up turns exist, deleting the first
+	// assistant message would lose the overview without regenerating it (a later
+	// assistant turn keeps OverviewSummary non-empty, which gates the stream off),
+	// so we leave the thread intact and only refresh the sources.
+	assistantCount := 0
+	for _, m := range conversation.Messages {
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			assistantCount++
+		}
+	}
+	if assistantCount == 1 {
+		if err := app.conversations.DeleteOverviewMessage(r.Context(), conversationID); err != nil {
+			loggerWithMeta(r.Context(), app.logger, conversationID).Error("research clear overview failed", "error", err)
+		}
+	}
+
 	if err := app.conversations.UpdateAnswerStatus(r.Context(), conversationID, "searching", "Re-running the search pipeline."); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("research status init failed", "error", err)
 	}
@@ -294,8 +312,10 @@ func (app *App) handleConversationResearch(w http.ResponseWriter, r *http.Reques
 		Query:          conversation.Title,
 	}
 	loggerWithMeta(r.Context(), app.logger, conversationID).Info("conversation_research_requested")
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, `{"enqueued":true}`)
+	// Reload the conversation: with the overview cleared the fresh page connects
+	// the live event stream and re-streams the grounded answer, exactly like the
+	// initial search (and like the "regenerate summary" button).
+	http.Redirect(w, r, fmt.Sprintf("/conversations/%d", conversationID), http.StatusSeeOther)
 }
 
 func (app *App) handleConversationCancel(w http.ResponseWriter, r *http.Request, conversationID int64) {
@@ -2262,6 +2282,23 @@ func (service *ConversationService) ResetSummaries(ctx context.Context, conversa
 	}
 
 	return tx.Commit()
+}
+
+// DeleteOverviewMessage removes the first assistant message (the grounded
+// overview answer) so the answer stream regenerates it from the current source
+// pool. Unlike ResetSummaries it leaves summaries/sources untouched — used by
+// re-search, which grows the existing pool with freshly discovered URLs.
+func (service *ConversationService) DeleteOverviewMessage(ctx context.Context, conversationID int64) error {
+	_, err := service.db.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE id = (
+			SELECT id FROM messages
+			WHERE conversation_id = ? AND role = 'assistant'
+			ORDER BY timestamp ASC, id ASC
+			LIMIT 1
+		)
+	`, conversationID)
+	return err
 }
 
 func (service *ConversationService) GetSearchResults(ctx context.Context, conversationID int64) ([]SearchResult, error) {
