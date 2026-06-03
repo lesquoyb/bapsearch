@@ -89,70 +89,103 @@ func (service *SummarizeService) runJob(job SummaryJob) {
 		}
 		processedAny = true
 	} else {
-		// Build the list of queries to search: always start with the original,
-		// then add LLM reformulations if the feature is enabled.
-		queries := []string{query}
-		if service.queryReformulations > 0 {
-			var err error
-			reformulations, err = service.llm.GenerateQueryReformulations(jobContext, meta, query, service.queryReformulations)
-			if err != nil {
-				logger.Warn("generating query reformulations failed, falling back to single search", "error", err)
-			} else {
-				logger.Info("query_reformulations_generated", "count", len(reformulations), "queries", reformulations)
-				queries = append(queries, reformulations...)
-			}
-		}
+		// seen deduplicates URLs across the original search and any reformulation
+		// searches (first occurrence wins). inserted accumulates the rows that
+		// were actually new so we only fetch/embed each once.
+		seen := make(map[string]bool)
+		var inserted []SearchResult
 
-		// Launch one search per query in parallel.
 		type searchBatch struct {
 			results      []SearchResult
 			engineStatus []SearchEngineStatus
 			err          error
 		}
-		batchCh := make(chan searchBatch, len(queries))
-		for _, q := range queries {
-			go func(q string) {
-				resp, err := service.search.Search(jobContext, q)
-				if err != nil {
-					batchCh <- searchBatch{err: err}
-					return
-				}
-				batchCh <- searchBatch{results: resp.Results, engineStatus: resp.EngineStatus}
-			}(q)
-		}
 
-		// Collect results, deduplicating by URL (first occurrence wins).
-		seen := make(map[string]bool)
-		var allResults []SearchResult
-		var allEngineStatus []SearchEngineStatus
-		for range queries {
-			batch := <-batchCh
-			if batch.err != nil {
-				logger.Warn("search batch failed", "error", batch.err)
-				continue
-			}
-			allEngineStatus = append(allEngineStatus, batch.engineStatus...)
-			for _, r := range batch.results {
+		// 1) Search the ORIGINAL query first and publish its raw results
+		//    immediately. The reformulation LLM call (when enabled) used to run
+		//    *before* this, so nothing appeared on screen until the answer model
+		//    had finished generating paraphrases — the main "time to first
+		//    results" regression. Reformulations now happen after results show.
+		originalResp, originalErr := service.search.Search(jobContext, query)
+		if originalErr != nil {
+			logger.Warn("original search failed", "error", originalErr)
+		} else {
+			var firstResults []SearchResult
+			for _, r := range originalResp.Results {
 				if !seen[r.URL] {
 					seen[r.URL] = true
-					allResults = append(allResults, r)
+					firstResults = append(firstResults, r)
+				}
+			}
+			if len(firstResults) > 0 {
+				ins, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, firstResults, originalResp.EngineStatus)
+				if err != nil {
+					service.failPipeline(jobContext, logger, job.ConversationID, err)
+					return
+				}
+				inserted = append(inserted, ins...)
+				// Raw results are visible now, before any LLM work.
+				service.events.Publish(job.ConversationID, "results", struct{}{})
+			}
+		}
+
+		// 2) Optionally widen coverage with LLM-generated reformulations,
+		//    searched in parallel and merged in. This runs only after the
+		//    original results are already on screen.
+		if service.queryReformulations > 0 {
+			refs, err := service.llm.GenerateQueryReformulations(jobContext, meta, query, service.queryReformulations)
+			if err != nil {
+				logger.Warn("generating query reformulations failed, continuing with original results", "error", err)
+			} else if len(refs) > 0 {
+				reformulations = refs
+				logger.Info("query_reformulations_generated", "count", len(refs), "queries", refs)
+
+				batchCh := make(chan searchBatch, len(refs))
+				for _, q := range refs {
+					go func(q string) {
+						resp, err := service.search.Search(jobContext, q)
+						if err != nil {
+							batchCh <- searchBatch{err: err}
+							return
+						}
+						batchCh <- searchBatch{results: resp.Results, engineStatus: resp.EngineStatus}
+					}(q)
+				}
+
+				var moreResults []SearchResult
+				var moreEngine []SearchEngineStatus
+				for range refs {
+					batch := <-batchCh
+					if batch.err != nil {
+						logger.Warn("reformulation search failed", "error", batch.err)
+						continue
+					}
+					moreEngine = append(moreEngine, batch.engineStatus...)
+					for _, r := range batch.results {
+						if !seen[r.URL] {
+							seen[r.URL] = true
+							moreResults = append(moreResults, r)
+						}
+					}
+				}
+
+				if len(moreResults) > 0 {
+					ins, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, moreResults, moreEngine)
+					if err != nil {
+						logger.Error("appending reformulation results failed", "error", err)
+					} else {
+						inserted = append(inserted, ins...)
+						// More results trickle in — refresh the panel again.
+						service.events.Publish(job.ConversationID, "results", struct{}{})
+					}
 				}
 			}
 		}
 
-		if len(allResults) == 0 {
+		if len(seen) == 0 {
 			service.failPipeline(jobContext, logger, job.ConversationID, fmt.Errorf("all search batches failed or returned no results"))
 			return
 		}
-
-		inserted, err := service.conversations.AppendSearchResults(jobContext, job.ConversationID, allResults, allEngineStatus)
-		if err != nil {
-			service.failPipeline(jobContext, logger, job.ConversationID, err)
-			return
-		}
-
-		// Notify the frontend that new search results are available.
-		service.events.Publish(job.ConversationID, "results", struct{}{})
 
 		if len(inserted) > 0 {
 			if err := service.processResults(jobContext, meta, logger, job.ConversationID, inserted); err != nil {
@@ -293,6 +326,13 @@ func (service *SummarizeService) processResults(ctx context.Context, meta Reques
 			return
 		}
 		for i, p := range pending {
+			// EmbedTexts may return a partial result (nil entry) when it fell
+			// back to per-item embedding and that one input still failed. Skip
+			// those rather than storing a "null" embedding that would poison ranking.
+			if i >= len(vectors) || vectors[i] == nil {
+				service.updateSummaryStatus(ctx, logger, conversationID, p.url, "error", "Embedding failed for this source.")
+				continue
+			}
 			embeddingJSON, err := json.Marshal(vectors[i])
 			if err != nil {
 				logger.Error("embedding serialization failed", "url", p.url, "error", err)

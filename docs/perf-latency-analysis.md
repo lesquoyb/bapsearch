@@ -1,6 +1,7 @@
 # Latency analysis — search → results, and results → answer
 
-> Status: investigation / design notes. No behaviour changed yet.
+> Status: analysis **plus** a first round of fixes landed on this branch — see
+> "Implemented" below. The remaining items stay as a plan.
 > Branch: `claude/search-latency`. Scope: understand why the two latencies grew
 > (they were fine early in the project) and lay out a prioritized fix plan.
 
@@ -37,6 +38,34 @@ research of paraphrases **+ truncate the number of tokens used for embeddings to
 avoid errors**"), which introduced both the reformulation step and
 `truncateToTokens`. The embedding-size problem it tried to fix is still not
 fixed reliably.
+
+---
+
+## Implemented in this branch
+
+Targeting all three axes; conservative, settings/presets still respected.
+
+- **Embedding reliability (R1+R3).** `truncateToTokens` (network + binary-search
+  + silent full-text fallback) is replaced by a pure, deterministic
+  `truncateForEmbedding(text, maxTokens)` char cap (`llm.go`). An embed input can
+  no longer be sent oversized, and the ~9 `/tokenize` round-trips per embed are
+  gone. Unit-tested.
+- **Graceful degradation (R2).** `EmbedTexts` now calls `embedBatch` and, on a
+  batch failure, falls back to embedding each input individually; failed entries
+  come back `nil` and the pipeline marks just that one source `error` instead of
+  dropping the whole batch (`llm.go`, `summarize.go` flush).
+- **Time-to-first-results (R4).** `runJob` searches the **original query first
+  and publishes its raw results before** generating LLM reformulations; the
+  reformulation searches are then merged in and the panel refreshed again
+  (`summarize.go`).
+- **Embeddings server budget.** `.env*` examples set `--ubatch-size` to match
+  `ctx-size` (2048) so inputs up to the configured `max_embedding_tokens`
+  (incl. the 1024/2048 presets) actually fit, with a comment explaining the
+  relationship.
+
+Deferred (still in the plan below): R5 (worker split), R6 (batch-size default —
+presets already set it per tier), R7 (`enable_thinking` default — presets set it
+per tier), R8 (`max_extract_chars`), R9 (trafilatura service), R10 (UTF‑8 cut).
 
 ---
 

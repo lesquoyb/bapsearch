@@ -484,80 +484,29 @@ func (service *LLMService) GenerateQueryReformulations(ctx context.Context, meta
 	return results, nil
 }
 
-// truncateToTokens calls the llama.cpp /tokenize endpoint and truncates text so
-// it fits within maxTokens. Falls back to character-based truncation on error.
-func (service *LLMService) truncateToTokens(ctx context.Context, text string, maxTokens int) string {
-	embURL := strings.TrimSpace(service.embeddingsURL)
-	if embURL == "" {
-		return text
-	}
-	// Derive base URL: strip everything from the last path component that starts with "v1" or is "embeddings"
-	// e.g. http://llama:8080/v1/embeddings -> http://llama:8080
-	baseURL := embURL
-	if idx := strings.Index(baseURL, "/v1/"); idx != -1 {
-		baseURL = baseURL[:idx]
-	} else if strings.HasSuffix(baseURL, "/embeddings") {
-		baseURL = strings.TrimSuffix(baseURL, "/embeddings")
-	}
-	tokenizeURL := baseURL + "/tokenize"
+// charsPerEmbeddingToken is a deliberately conservative average (English text
+// is ~4 chars/token; denser inputs only push the real token count lower) used
+// to bound text by characters before it reaches the embeddings server.
+const charsPerEmbeddingToken = 4
 
-	type tokenizeRequest struct {
-		Content string `json:"content"`
+// truncateForEmbedding bounds text to roughly maxTokens, by characters, with no
+// network call. The previous implementation asked the llama.cpp /tokenize
+// endpoint for an exact count and — critically — returned the FULL, untruncated
+// text on any error (bad URL, unreachable endpoint, unexpected JSON, non-2xx).
+// When that happened a whole extracted page (up to max_extract_chars) was POSTed
+// to a context-limited embeddings server, which rejected it, so embeddings
+// failed on most pages "no matter the setting". A deterministic char cap can
+// never silently no-op, and the exact token count is irrelevant for ranking.
+func truncateForEmbedding(text string, maxTokens int) string {
+	if maxTokens <= 0 {
+		maxTokens = 256
 	}
-	type tokenizeResponse struct {
-		Tokens []int `json:"tokens"`
-	}
-
-	payload, _ := json.Marshal(tokenizeRequest{Content: text})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenizeURL, bytes.NewReader(payload))
-	if err != nil {
-		return text
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := service.client.Do(req)
-	if err != nil {
-		return text
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || resp.StatusCode >= http.StatusBadRequest {
-		return text
-	}
-
-	var tokResp tokenizeResponse
-	if err := json.Unmarshal(body, &tokResp); err != nil || len(tokResp.Tokens) <= maxTokens {
-		return text
-	}
-
-	// Too many tokens: binary-search for the char length that fits.
+	maxChars := maxTokens * charsPerEmbeddingToken
 	runes := []rune(text)
-	lo, hi := 0, len(runes)
-	for hi-lo > 16 {
-		mid := (lo + hi) / 2
-		candidate, _ := json.Marshal(tokenizeRequest{Content: string(runes[:mid])})
-		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenizeURL, bytes.NewReader(candidate))
-		if err != nil {
-			break
-		}
-		req2.Header.Set("Content-Type", "application/json")
-		resp2, err := service.client.Do(req2)
-		if err != nil {
-			break
-		}
-		b2, _ := io.ReadAll(resp2.Body)
-		resp2.Body.Close()
-		var tr2 tokenizeResponse
-		if err := json.Unmarshal(b2, &tr2); err != nil {
-			break
-		}
-		if len(tr2.Tokens) <= maxTokens {
-			lo = mid
-		} else {
-			hi = mid
-		}
+	if len(runes) <= maxChars {
+		return text
 	}
-	return strings.TrimSpace(string(runes[:lo]))
+	return strings.TrimSpace(string(runes[:maxChars]))
 }
 
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
@@ -566,7 +515,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, fmt.Errorf("cannot embed empty text")
 	}
 
-	text = service.truncateToTokens(ctx, text, service.maxEmbeddingTokens)
+	text = truncateForEmbedding(text, service.maxEmbeddingTokens)
 
 	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
 	body, err := json.Marshal(payload)
@@ -669,9 +618,47 @@ func (service *LLMService) EmbedTexts(ctx context.Context, meta RequestMeta, tex
 		if trimmed == "" {
 			return nil, fmt.Errorf("cannot embed empty text in batch")
 		}
-		inputs = append(inputs, service.truncateToTokens(ctx, trimmed, service.maxEmbeddingTokens))
+		inputs = append(inputs, truncateForEmbedding(trimmed, service.maxEmbeddingTokens))
 	}
 
+	vectors, err := service.embedBatch(ctx, meta, inputs)
+	if err == nil {
+		return vectors, nil
+	}
+
+	// Graceful degradation: a batch failure is often a single oversized or
+	// otherwise-bad input. Embed one-by-one so the good sources still rank;
+	// failed entries are left nil and skipped by the caller.
+	service.llm().Warn("embedding_batch_fallback_per_item",
+		"request_id", meta.RequestID,
+		"conversation_id", meta.ConversationID,
+		"batch_size", len(inputs),
+		"error", err.Error(),
+	)
+	out := make([][]float64, len(texts))
+	succeeded := 0
+	var firstErr error
+	for i := range texts {
+		v, e := service.EmbedText(ctx, meta, texts[i])
+		if e != nil {
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		out[i] = v
+		succeeded++
+	}
+	if succeeded == 0 {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+// embedBatch sends every input to the embeddings endpoint in a single request,
+// returning one vector per input in order. Inputs must already be trimmed and
+// truncated. Any failure is returned so EmbedTexts can fall back to per-item.
+func (service *LLMService) embedBatch(ctx context.Context, meta RequestMeta, inputs []string) ([][]float64, error) {
 	payload := llamaEmbeddingRequest{Input: inputs, Model: "local"}
 	body, err := json.Marshal(payload)
 	if err != nil {
