@@ -87,16 +87,15 @@
       e.preventDefault();
       var btn = form.querySelector('button[type="submit"]');
       if (btn) btn.disabled = true;
-      // Make sure the live stream is open so the progress bar, status dots and
-      // reordering update in real time — even on a conversation that had
-      // already finished (and therefore had no SSE connection).
+      // The only async-action left is rerank (⇅). Re-open the live stream so its
+      // pipeline/status events show on a conversation that had already finished
+      // (and therefore had no SSE connection).
       bapReconnectConversationEvents();
       fetch(form.action, { method: 'POST' })
         .then(function() {
           // Rerank publishes its events synchronously and may finish before the
           // freshly-opened SSE connection is ready, so re-fetch the results
-          // panel directly to guarantee the new order/scores show. Harmless for
-          // re-search (the SSE stream keeps it updated afterwards).
+          // panel directly to guarantee the new order/scores show.
           var body = document.getElementById('conversation-body');
           var panel = document.getElementById('results-panel');
           if (body && panel && body.dataset.resultsUrl) {
@@ -1358,12 +1357,13 @@
     };
   }
 
-  // Re-open the live event stream after a partial relaunch (rerank / re-search)
-  // on an already-completed conversation. Such conversations load with
+  // Re-open the live event stream after an in-place relaunch (rerank) on an
+  // already-completed conversation. Such conversations load with
   // data-done="true", so bapInitConversationEvents never subscribed and the
   // pipeline/card/reorder events fired into the void — the user saw nothing
   // happen until a manual reload. Resetting the done flag + revealing the
-  // progress UI before re-subscribing restores live feedback.
+  // progress UI before re-subscribing restores live feedback. (Re-search takes
+  // a different path: it reloads the page and regenerates the answer.)
   function bapReconnectConversationEvents() {
     var body = document.getElementById('conversation-body');
     if (!body) return;
