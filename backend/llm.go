@@ -36,6 +36,12 @@ type LLMService struct {
 	contextTokens     int
 	maxEmbeddingTokens int
 	embeddingBatchSize int
+	// embedTokenLimit is the largest input the embeddings server actually
+	// accepts, learned from its rejection messages (a model's real context can
+	// be far below the configured ctx — e.g. a 256-token embedding model). Once
+	// learned, every embed is pre-clamped to it so we don't retry on each call.
+	embedMu         sync.Mutex
+	embedTokenLimit int
 	enableThinking    bool
 	reasoningBudget   int
 	temperature       float64
@@ -514,24 +520,87 @@ func truncateForEmbedding(text string, maxTokens int) string {
 	return strings.TrimSpace(string(runes[:maxChars]))
 }
 
-// embedTooLargeRe matches llama.cpp's "input (N tokens) is too large to
-// process. increase the physical batch size (current batch size: M)" so we can
-// shrink the input to fit M and retry, whatever the server's --ubatch-size is.
-var embedTooLargeRe = regexp.MustCompile(`input \((\d+) tokens\).*?batch size:?\s*(\d+)`)
+// llama.cpp rejects oversized embedding inputs two ways, depending on whether
+// the input exceeds the physical batch (--ubatch-size) or the model's context
+// (n_ctx, which can be far below the configured ctx for a small model):
+//   500 "input (N tokens) is too large to process ... batch size: M"
+//   400 "input (N tokens) is larger than the max context size (M tokens)"
+// The 400 form also carries n_prompt_tokens / n_ctx as JSON fields.
+var (
+	embedBatchRe = regexp.MustCompile(`input \((\d+) tokens\).*?batch size:?\s*(\d+)`)
+	embedCtxRe   = regexp.MustCompile(`input \((\d+) tokens\).*?context size \((\d+)`)
+)
 
-// parseEmbedTooLarge returns the reported (tokens, physicalBatch) when the
-// embeddings server rejected an input for exceeding its physical batch.
-func parseEmbedTooLarge(status int, body string) (tokens, batch int) {
+type embedErrorEnvelope struct {
+	Error struct {
+		Message       string `json:"message"`
+		NPromptTokens int    `json:"n_prompt_tokens"`
+		NCtx          int    `json:"n_ctx"`
+		NBatch        int    `json:"n_batch"`
+	} `json:"error"`
+}
+
+// parseEmbedTooLarge returns the (inputTokens, limit) the server reported when
+// it refused an input for being too large, across both rejection formats. limit
+// is the binding constraint (context or physical batch). Returns (0,0) for any
+// other error.
+func parseEmbedTooLarge(status int, body string) (tokens, limit int) {
 	if status < http.StatusBadRequest || body == "" {
 		return 0, 0
 	}
-	m := embedTooLargeRe.FindStringSubmatch(body)
-	if len(m) != 3 {
-		return 0, 0
+	// Prefer the structured fields when present (the 400 context error).
+	var env embedErrorEnvelope
+	if json.Unmarshal([]byte(body), &env) == nil && env.Error.NPromptTokens > 0 {
+		lim := env.Error.NCtx
+		if env.Error.NBatch > 0 && (lim == 0 || env.Error.NBatch < lim) {
+			lim = env.Error.NBatch
+		}
+		if lim > 0 {
+			return env.Error.NPromptTokens, lim
+		}
 	}
-	tokens, _ = strconv.Atoi(m[1])
-	batch, _ = strconv.Atoi(m[2])
-	return tokens, batch
+	// Fall back to scraping the message text (the 500 batch error has no fields).
+	for _, re := range []*regexp.Regexp{embedCtxRe, embedBatchRe} {
+		if m := re.FindStringSubmatch(body); len(m) == 3 {
+			t, _ := strconv.Atoi(m[1])
+			l, _ := strconv.Atoi(m[2])
+			if t > 0 && l > 0 {
+				return t, l
+			}
+		}
+	}
+	return 0, 0
+}
+
+// embedBudget is the token cap to apply before sending: the configured
+// max_embedding_tokens, lowered to whatever the server has been observed to
+// accept.
+func (service *LLMService) embedBudget() int {
+	n := service.maxEmbeddingTokens
+	service.embedMu.Lock()
+	limit := service.embedTokenLimit
+	service.embedMu.Unlock()
+	if limit > 0 && limit < n {
+		return limit
+	}
+	return n
+}
+
+// noteEmbedTokenLimit records (the smallest) server-reported acceptance limit,
+// with a safety margin, so subsequent embeds are pre-clamped and don't retry.
+func (service *LLMService) noteEmbedTokenLimit(limit int) {
+	if limit <= 1 {
+		return
+	}
+	safe := limit * 9 / 10
+	if safe < 1 {
+		safe = limit
+	}
+	service.embedMu.Lock()
+	if service.embedTokenLimit == 0 || safe < service.embedTokenLimit {
+		service.embedTokenLimit = safe
+	}
+	service.embedMu.Unlock()
 }
 
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
@@ -544,7 +613,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, fmt.Errorf("embeddings endpoint is not configured")
 	}
 
-	text = truncateForEmbedding(text, service.maxEmbeddingTokens)
+	text = truncateForEmbedding(text, service.embedBudget())
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -553,19 +622,20 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 			return vec, nil
 		}
 		lastErr = err
-		// If the server rejected the input as larger than its physical batch,
-		// shrink to fit using its OWN token count (so we get the exact
-		// chars/token ratio) and retry. This makes embeddings succeed regardless
-		// of the embeddings container's --ubatch-size.
-		if tokens, batch := parseEmbedTooLarge(status, respBody); batch > 0 && tokens > batch {
+		// If the server rejected the input for exceeding its context or physical
+		// batch, learn the limit and shrink to fit using the server's OWN token
+		// count (exact chars/token ratio), then retry. This makes embeddings
+		// succeed whatever the embeddings model's real context is.
+		if tokens, limit := parseEmbedTooLarge(status, respBody); limit > 0 && tokens > limit {
+			service.noteEmbedTokenLimit(limit)
 			runes := []rune(text)
-			target := int(float64(len(runes)) * float64(batch) / float64(tokens) * 0.9)
+			target := int(float64(len(runes)) * float64(limit) / float64(tokens) * 0.9)
 			if target > 0 && target < len(runes) {
 				service.llm().Warn("embedding_input_too_large_retry",
 					"request_id", meta.RequestID,
 					"conversation_id", meta.ConversationID,
 					"reported_tokens", tokens,
-					"physical_batch", batch,
+					"server_limit", limit,
 					"from_chars", len(runes),
 					"to_chars", target,
 				)
@@ -678,7 +748,7 @@ func (service *LLMService) EmbedTexts(ctx context.Context, meta RequestMeta, tex
 		if trimmed == "" {
 			return nil, fmt.Errorf("cannot embed empty text in batch")
 		}
-		inputs = append(inputs, truncateForEmbedding(trimmed, service.maxEmbeddingTokens))
+		inputs = append(inputs, truncateForEmbedding(trimmed, service.embedBudget()))
 	}
 
 	vectors, err := service.embedBatch(ctx, meta, inputs)

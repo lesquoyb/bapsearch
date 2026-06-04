@@ -40,19 +40,25 @@ func TestTruncateForEmbeddingNeverExceedsBudget(t *testing.T) {
 	}
 }
 
-// The adaptive retry depends on parsing llama.cpp's exact rejection message.
+// The adaptive retry depends on parsing both of llama.cpp's rejection formats.
 func TestParseEmbedTooLarge(t *testing.T) {
-	body := `{"error":{"code":500,"message":"input (558 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}`
-	tokens, batch := parseEmbedTooLarge(500, body)
-	if tokens != 558 || batch != 512 {
-		t.Fatalf("parseEmbedTooLarge = (%d, %d), want (558, 512)", tokens, batch)
+	// Physical-batch rejection (500, no structured fields).
+	batchErr := `{"error":{"code":500,"message":"input (558 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}`
+	if tk, lim := parseEmbedTooLarge(500, batchErr); tk != 558 || lim != 512 {
+		t.Fatalf("batch error = (%d, %d), want (558, 512)", tk, lim)
+	}
+
+	// Context-size rejection (400, with n_prompt_tokens / n_ctx fields).
+	ctxErr := `{"error":{"code":400,"message":"input (467 tokens) is larger than the max context size (256 tokens). skipping","type":"exceed_context_size_error","n_prompt_tokens":467,"n_ctx":256}}`
+	if tk, lim := parseEmbedTooLarge(400, ctxErr); tk != 467 || lim != 256 {
+		t.Fatalf("context error = (%d, %d), want (467, 256)", tk, lim)
 	}
 
 	// Non-size errors and success must not match.
-	if tk, b := parseEmbedTooLarge(500, `{"error":{"message":"out of memory"}}`); tk != 0 || b != 0 {
-		t.Fatalf("unrelated error matched: (%d, %d)", tk, b)
+	if tk, l := parseEmbedTooLarge(500, `{"error":{"message":"out of memory"}}`); tk != 0 || l != 0 {
+		t.Fatalf("unrelated error matched: (%d, %d)", tk, l)
 	}
-	if tk, b := parseEmbedTooLarge(200, body); tk != 0 || b != 0 {
-		t.Fatalf("2xx status matched: (%d, %d)", tk, b)
+	if tk, l := parseEmbedTooLarge(200, ctxErr); tk != 0 || l != 0 {
+		t.Fatalf("2xx status matched: (%d, %d)", tk, l)
 	}
 }
