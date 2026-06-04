@@ -10,3 +10,5 @@ docker/.env
 .env
 models/current-model.txt
 /.claude
+__pycache__/
+*.pyc
