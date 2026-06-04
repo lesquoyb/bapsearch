@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -484,10 +486,13 @@ func (service *LLMService) GenerateQueryReformulations(ctx context.Context, meta
 	return results, nil
 }
 
-// charsPerEmbeddingToken is a deliberately conservative average (English text
-// is ~4 chars/token; denser inputs only push the real token count lower) used
-// to bound text by characters before it reaches the embeddings server.
-const charsPerEmbeddingToken = 4
+// charsPerEmbeddingToken bounds text by characters before it reaches the
+// embeddings server. It is deliberately LOWER than the real ~3.6 chars/token of
+// typical web text so a maxTokens budget stays safely under the server's
+// physical batch (e.g. a 500-token budget → 1500 chars ≈ 420 tokens, under a
+// common ubatch of 512). Inputs that are still too dense are caught by the
+// adaptive retry in EmbedText, which fits to the size the server reports.
+const charsPerEmbeddingToken = 3
 
 // truncateForEmbedding bounds text to roughly maxTokens, by characters, with no
 // network call. The previous implementation asked the llama.cpp /tokenize
@@ -509,30 +514,85 @@ func truncateForEmbedding(text string, maxTokens int) string {
 	return strings.TrimSpace(string(runes[:maxChars]))
 }
 
+// embedTooLargeRe matches llama.cpp's "input (N tokens) is too large to
+// process. increase the physical batch size (current batch size: M)" so we can
+// shrink the input to fit M and retry, whatever the server's --ubatch-size is.
+var embedTooLargeRe = regexp.MustCompile(`input \((\d+) tokens\).*?batch size:?\s*(\d+)`)
+
+// parseEmbedTooLarge returns the reported (tokens, physicalBatch) when the
+// embeddings server rejected an input for exceeding its physical batch.
+func parseEmbedTooLarge(status int, body string) (tokens, batch int) {
+	if status < http.StatusBadRequest || body == "" {
+		return 0, 0
+	}
+	m := embedTooLargeRe.FindStringSubmatch(body)
+	if len(m) != 3 {
+		return 0, 0
+	}
+	tokens, _ = strconv.Atoi(m[1])
+	batch, _ = strconv.Atoi(m[2])
+	return tokens, batch
+}
+
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, fmt.Errorf("cannot embed empty text")
 	}
-
-	text = truncateForEmbedding(text, service.maxEmbeddingTokens)
-
-	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
 	endpoint := strings.TrimSpace(service.embeddingsURL)
 	if endpoint == "" {
 		return nil, fmt.Errorf("embeddings endpoint is not configured")
+	}
+
+	text = truncateForEmbedding(text, service.maxEmbeddingTokens)
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		vec, status, respBody, err := service.embedOnce(ctx, meta, endpoint, text)
+		if err == nil {
+			return vec, nil
+		}
+		lastErr = err
+		// If the server rejected the input as larger than its physical batch,
+		// shrink to fit using its OWN token count (so we get the exact
+		// chars/token ratio) and retry. This makes embeddings succeed regardless
+		// of the embeddings container's --ubatch-size.
+		if tokens, batch := parseEmbedTooLarge(status, respBody); batch > 0 && tokens > batch {
+			runes := []rune(text)
+			target := int(float64(len(runes)) * float64(batch) / float64(tokens) * 0.9)
+			if target > 0 && target < len(runes) {
+				service.llm().Warn("embedding_input_too_large_retry",
+					"request_id", meta.RequestID,
+					"conversation_id", meta.ConversationID,
+					"reported_tokens", tokens,
+					"physical_batch", batch,
+					"from_chars", len(runes),
+					"to_chars", target,
+				)
+				text = strings.TrimSpace(string(runes[:target]))
+				continue
+			}
+		}
+		break
+	}
+	return nil, lastErr
+}
+
+// embedOnce performs a single embeddings request. It returns the HTTP status
+// code and response body alongside any error so the caller can adapt (e.g. on a
+// "too large for the physical batch" rejection).
+func (service *LLMService) embedOnce(ctx context.Context, meta RequestMeta, endpoint, text string) ([]float64, int, string, error) {
+	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, "", err
 	}
 
 	started := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -547,13 +607,13 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 			"duration_ms", time.Since(started).Milliseconds(),
 			"error", err.Error(),
 		)
-		return nil, err
+		return nil, 0, "", err
 	}
 	defer resp.Body.Close()
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, "", err
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		service.llm().Error("embedding_request_status",
@@ -565,12 +625,12 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 			"status_code", resp.StatusCode,
 			"body", string(responseBody),
 		)
-		return nil, fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(responseBody))
+		return nil, resp.StatusCode, string(responseBody), fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(responseBody))
 	}
 
 	var payloadResponse llamaEmbeddingResponse
 	if err := json.Unmarshal(responseBody, &payloadResponse); err != nil {
-		return nil, err
+		return nil, resp.StatusCode, string(responseBody), err
 	}
 
 	var vector []float64
@@ -581,7 +641,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		vector = payloadResponse.Embedding
 	}
 	if vector == nil {
-		return nil, fmt.Errorf("embedding endpoint returned no vector")
+		return nil, resp.StatusCode, string(responseBody), fmt.Errorf("embedding endpoint returned no vector")
 	}
 	service.llm().Info("embedding_response",
 		"timestamp", time.Now().UTC().Format(time.RFC3339),
@@ -593,7 +653,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		"vector_dim", len(vector),
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
-	return vector, nil
+	return vector, resp.StatusCode, string(responseBody), nil
 }
 
 // EmbedTexts embeds several inputs in a single HTTP request. Returns one
