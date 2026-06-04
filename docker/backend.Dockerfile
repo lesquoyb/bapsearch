@@ -14,6 +14,8 @@ RUN apt-get update \
 COPY --from=builder /out/bap-search-backend /app/bap-search-backend
 COPY ui /app/ui
 COPY database /app/database
-RUN mkdir -p /models /logs /database
+COPY docker/trafilatura_server.py /app/trafilatura_server.py
+COPY docker/backend-entrypoint.sh /app/backend-entrypoint.sh
+RUN chmod +x /app/backend-entrypoint.sh && mkdir -p /models /logs /database
 EXPOSE 8081
-CMD ["/app/bap-search-backend"]
+CMD ["/app/backend-entrypoint.sh"]

@@ -72,9 +72,21 @@ Targeting all three axes; conservative, settings/presets still respected.
   `max_extract_chars` drops 12000→6000 (the answer already truncates each source
   to ~3000 chars, so 6000 keeps full answer context while trimming wasted
   extraction/storage).
+- **Embedding fits the real model context.** The send budget is clamped to the
+  embeddings server's actual `n_ctx`, discovered proactively from `GET /props`
+  and refreshed periodically, with a reactive fallback that parses both
+  rejection formats (physical batch *and* context size) and shrinks/​retries.
+  Embeddings stop failing whatever the model's real context is (`llm.go`).
+- **Fetch cap (the "cleaning and extracting" drag).** The main pipeline only
+  deep-processes the top `urlLimit*(1+reformulations)` results instead of every
+  one; the rest stay as raw results, marked skipped (`summarize.go`).
+- **Trafilatura as a long-lived service (R9) + UTF‑8-safe cut (R10).** A small
+  stdlib HTTP extractor imports trafilatura once and is started by the backend
+  entrypoint; the Go side POSTs HTML to it (`BAP_TRAFILATURA_URL`) and falls
+  back to the CLI if it's down — no more Python startup per page. Extract
+  truncation now cuts on rune boundaries (`fetch.go`, `docker/`).
 
-Deferred: R6 (embedding batch-size default — presets already set it per tier),
-R9 (trafilatura as a long-lived service), R10 (UTF‑8-safe extract cut).
+Deferred: R6 (embedding batch-size default — presets already set it per tier).
 
 ---
 
