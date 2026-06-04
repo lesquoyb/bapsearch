@@ -40,6 +40,21 @@ func TestTruncateForEmbeddingNeverExceedsBudget(t *testing.T) {
 	}
 }
 
+// The proactive /props guardrail derives the server root from the embeddings URL.
+func TestEmbedServerBaseURL(t *testing.T) {
+	cases := map[string]string{
+		"http://llama-embeddings:8080/v1/embeddings": "http://llama-embeddings:8080",
+		"http://host:8080/embeddings":                "http://host:8080",
+		"http://host:8080/v1/embeddings/":            "http://host:8080",
+		"":                                           "",
+	}
+	for in, want := range cases {
+		if got := embedServerBaseURL(in); got != want {
+			t.Fatalf("embedServerBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // The adaptive retry depends on parsing both of llama.cpp's rejection formats.
 func TestParseEmbedTooLarge(t *testing.T) {
 	// Physical-batch rejection (500, no structured fields).

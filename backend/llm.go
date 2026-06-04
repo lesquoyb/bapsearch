@@ -37,11 +37,13 @@ type LLMService struct {
 	maxEmbeddingTokens int
 	embeddingBatchSize int
 	// embedTokenLimit is the largest input the embeddings server actually
-	// accepts, learned from its rejection messages (a model's real context can
-	// be far below the configured ctx — e.g. a 256-token embedding model). Once
-	// learned, every embed is pre-clamped to it so we don't retry on each call.
+	// accepts. It is discovered proactively from the server's /props (its real
+	// n_ctx, already capped to the model) and, as a fallback, learned from
+	// rejection messages. Every embed is pre-clamped to it.
 	embedMu         sync.Mutex
 	embedTokenLimit int
+	embedCtxAt      time.Time // last /props probe
+	embedCtxProbed  bool
 	enableThinking    bool
 	reasoningBudget   int
 	temperature       float64
@@ -573,9 +575,10 @@ func parseEmbedTooLarge(status int, body string) (tokens, limit int) {
 }
 
 // embedBudget is the token cap to apply before sending: the configured
-// max_embedding_tokens, lowered to whatever the server has been observed to
-// accept.
-func (service *LLMService) embedBudget() int {
+// max_embedding_tokens, clamped to what the embeddings server actually accepts
+// (its real n_ctx, probed from /props; or a limit learned from a rejection).
+func (service *LLMService) embedBudget(ctx context.Context, meta RequestMeta) int {
+	service.ensureEmbedContextLimit(ctx, meta)
 	n := service.maxEmbeddingTokens
 	service.embedMu.Lock()
 	limit := service.embedTokenLimit
@@ -603,6 +606,95 @@ func (service *LLMService) noteEmbedTokenLimit(limit int) {
 	service.embedMu.Unlock()
 }
 
+// embedServerBaseURL derives the llama.cpp server root from the embeddings
+// endpoint, e.g. http://host:8080/v1/embeddings -> http://host:8080.
+func embedServerBaseURL(embeddingsURL string) string {
+	base := strings.TrimSpace(embeddingsURL)
+	if base == "" {
+		return ""
+	}
+	if idx := strings.Index(base, "/v1/"); idx != -1 {
+		base = base[:idx]
+	} else if strings.HasSuffix(base, "/embeddings") {
+		base = strings.TrimSuffix(base, "/embeddings")
+	}
+	return strings.TrimRight(base, "/")
+}
+
+// ensureEmbedContextLimit proactively asks the embeddings server for its real
+// context size (GET /props) and uses it as the send ceiling, so we never POST
+// more tokens than the model can accept. Refreshed periodically so it follows
+// model reloads. Best-effort: if /props is unavailable we silently fall back to
+// the reactive limit learned from rejection messages.
+func (service *LLMService) ensureEmbedContextLimit(ctx context.Context, meta RequestMeta) {
+	service.embedMu.Lock()
+	if service.embedCtxProbed && time.Since(service.embedCtxAt) < 2*time.Minute {
+		service.embedMu.Unlock()
+		return
+	}
+	// Claim the probe window now so concurrent embeds don't all hit /props.
+	service.embedCtxAt = time.Now()
+	service.embedCtxProbed = true
+	service.embedMu.Unlock()
+
+	nCtx := service.fetchEmbedContextTokens(ctx)
+	if nCtx <= 0 {
+		return
+	}
+	safe := nCtx * 9 / 10
+	service.embedMu.Lock()
+	prev := service.embedTokenLimit
+	// /props is authoritative for the current model: set it (can raise if the
+	// model was swapped for a larger one).
+	service.embedTokenLimit = safe
+	service.embedMu.Unlock()
+	if prev != safe {
+		service.llm().Info("embedding_context_limit",
+			"request_id", meta.RequestID,
+			"n_ctx", nCtx,
+			"send_budget_tokens", safe,
+		)
+	}
+}
+
+// fetchEmbedContextTokens reads the server's n_ctx from /props. Returns 0 on any
+// failure or if the route/shape isn't recognised.
+func (service *LLMService) fetchEmbedContextTokens(ctx context.Context) int {
+	base := embedServerBaseURL(service.embeddingsURL)
+	if base == "" {
+		return 0
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/props", nil)
+	if err != nil {
+		return 0
+	}
+	resp, err := service.client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return 0
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+	var props struct {
+		NCtx                      int `json:"n_ctx"`
+		DefaultGenerationSettings struct {
+			NCtx int `json:"n_ctx"`
+		} `json:"default_generation_settings"`
+	}
+	if json.Unmarshal(body, &props) != nil {
+		return 0
+	}
+	if props.DefaultGenerationSettings.NCtx > 0 {
+		return props.DefaultGenerationSettings.NCtx
+	}
+	return props.NCtx
+}
+
 func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text string) ([]float64, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -613,7 +705,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 		return nil, fmt.Errorf("embeddings endpoint is not configured")
 	}
 
-	text = truncateForEmbedding(text, service.embedBudget())
+	text = truncateForEmbedding(text, service.embedBudget(ctx, meta))
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -748,7 +840,7 @@ func (service *LLMService) EmbedTexts(ctx context.Context, meta RequestMeta, tex
 		if trimmed == "" {
 			return nil, fmt.Errorf("cannot embed empty text in batch")
 		}
-		inputs = append(inputs, truncateForEmbedding(trimmed, service.embedBudget()))
+		inputs = append(inputs, truncateForEmbedding(trimmed, service.embedBudget(ctx, meta)))
 	}
 
 	vectors, err := service.embedBatch(ctx, meta, inputs)
