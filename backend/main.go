@@ -36,6 +36,7 @@ type Config struct {
 	LogsPath             string
 	LLMLogsPath          string
 	TrafilaturaPath      string
+	TrafilaturaURL       string
 	SummarizeURLLimit    int
 	MaxExtractChars      int
 	MaxEmbeddingTokens    int
@@ -272,7 +273,7 @@ func main() {
 		topP:              1.0,
 		topK:              40,
 	}
-	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.FetchWorkers, cfg.MaxExtractChars)
+	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.TrafilaturaURL, cfg.FetchWorkers, cfg.MaxExtractChars)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	eventBroker := NewEventBroker()
 	cancellations := NewCancellations()
@@ -704,6 +705,7 @@ func loadConfig() Config {
 		LogsPath:             envOrDefault("BAP_LOG_PATH", "/logs/backend.jsonl"),
 		LLMLogsPath:          envOrDefault("BAP_LLM_LOG_PATH", "/logs/llm.jsonl"),
 		TrafilaturaPath:      envOrDefault("TRAFILATURA_BIN", "trafilatura"),
+		TrafilaturaURL:       envOrDefault("BAP_TRAFILATURA_URL", "http://127.0.0.1:8090/extract"),
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 6000),
 		MaxEmbeddingTokens:    envOrDefaultInt("BAP_MAX_EMBEDDING_TOKENS", 500),

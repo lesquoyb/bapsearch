@@ -239,7 +239,27 @@ func (service *SummarizeService) runProcessStage(job ProcessJob) {
 	logger := loggerWithMeta(jobContext, service.logger, job.ConversationID)
 	logger.Info("process_stage_started", "results", len(job.Results), "force_full", job.ForceFull)
 
-	if err := service.processResults(jobContext, meta, logger, job.ConversationID, job.Results); err != nil {
+	// Only deep-process (fetch → extract → embed) the top results. The main
+	// pipeline previously fetched EVERY search result — dozens once
+	// reformulations fan out — each spawning a trafilatura subprocess, which is
+	// what made "cleaning and extracting" drag. Scale the cap by the number of
+	// queries (like the iterative path) and mark the rest skipped so their card
+	// dot doesn't sit stuck on "pending"; they remain available as raw results.
+	limit := service.urlLimit
+	if limit <= 0 {
+		limit = 3
+	}
+	maxFetch := limit * (1 + len(job.Reformulations))
+	toProcess := job.Results
+	if len(job.Results) > maxFetch {
+		toProcess = job.Results[:maxFetch]
+		for _, r := range job.Results[maxFetch:] {
+			service.updateSummaryStatus(jobContext, logger, job.ConversationID, r.URL, "skipped", "Beyond the per-search URL limit; kept as a raw result.")
+		}
+		logger.Info("process_stage_capped", "fetched", maxFetch, "skipped", len(job.Results)-maxFetch)
+	}
+
+	if err := service.processResults(jobContext, meta, logger, job.ConversationID, toProcess); err != nil {
 		service.failPipeline(jobContext, logger, job.ConversationID, err)
 		return
 	}

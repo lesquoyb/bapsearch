@@ -32,22 +32,29 @@ type PageCache struct {
 }
 
 type FetchService struct {
-	logger          *slog.Logger
-	trafilaturaPath string
-	workerCount     int
-	maxExtractChars int
-	client          *http.Client
-	cache           *PageCache
+	logger            *slog.Logger
+	trafilaturaPath   string
+	trafilaturaURL    string
+	workerCount       int
+	maxExtractChars   int
+	client            *http.Client
+	trafilaturaClient *http.Client
+	serviceWarnOnce   sync.Once
+	cache             *PageCache
 }
 
-func NewFetchService(logger *slog.Logger, trafilaturaPath string, workerCount, maxExtractChars int) *FetchService {
+func NewFetchService(logger *slog.Logger, trafilaturaPath, trafilaturaURL string, workerCount, maxExtractChars int) *FetchService {
 	return &FetchService{
 		logger:          logger,
 		trafilaturaPath: trafilaturaPath,
+		trafilaturaURL:  strings.TrimSpace(trafilaturaURL),
 		workerCount:     workerCount,
 		maxExtractChars: maxExtractChars,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
+		},
+		trafilaturaClient: &http.Client{
+			Timeout: 30 * time.Second,
 		},
 		cache: &PageCache{items: map[string]cachedPage{}},
 	}
@@ -158,7 +165,65 @@ func (service *FetchService) fetchDocument(ctx context.Context, meta RequestMeta
 	return PageDocument{Rank: result.Rank, URL: result.URL, Title: result.Title, Text: text}, nil
 }
 
+// extractText turns raw HTML into clean main text. It prefers the long-lived
+// trafilatura HTTP service (no per-page Python startup) and falls back to the
+// trafilatura CLI subprocess if that service is unavailable.
 func (service *FetchService) extractText(ctx context.Context, rawHTML []byte) (string, error) {
+	if service.trafilaturaURL != "" {
+		text, err := service.extractViaService(ctx, rawHTML)
+		if err == nil {
+			return service.capExtract(text), nil
+		}
+		service.serviceWarnOnce.Do(func() {
+			service.logger.Warn("trafilatura service unavailable; falling back to the CLI per page",
+				"url", service.trafilaturaURL, "error", err)
+		})
+	}
+	text, err := service.extractViaCLI(ctx, rawHTML)
+	if err != nil {
+		return "", err
+	}
+	return service.capExtract(text), nil
+}
+
+// capExtract trims and bounds extracted text to maxExtractChars, cutting on rune
+// boundaries so the last character is never split.
+func (service *FetchService) capExtract(text string) string {
+	text = strings.TrimSpace(text)
+	if service.maxExtractChars <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) > service.maxExtractChars {
+		return string(runes[:service.maxExtractChars])
+	}
+	return text
+}
+
+func (service *FetchService) extractViaService(ctx context.Context, rawHTML []byte) (string, error) {
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, service.trafilaturaURL, bytes.NewReader(rawHTML))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "text/html; charset=utf-8")
+	resp, err := service.trafilaturaClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return "", fmt.Errorf("trafilatura service returned status %d", resp.StatusCode)
+	}
+	return string(body), nil
+}
+
+func (service *FetchService) extractViaCLI(ctx context.Context, rawHTML []byte) (string, error) {
 	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(tctx, service.trafilaturaPath)
@@ -172,12 +237,7 @@ func (service *FetchService) extractText(ctx context.Context, rawHTML []byte) (s
 	if err := command.Run(); err != nil {
 		return "", fmt.Errorf("trafilatura failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
-
-	text := strings.TrimSpace(stdout.String())
-	if len(text) > service.maxExtractChars {
-		text = text[:service.maxExtractChars]
-	}
-	return text, nil
+	return stdout.String(), nil
 }
 
 func (service *FetchService) cacheGet(url string) (string, bool) {
