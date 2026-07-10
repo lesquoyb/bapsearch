@@ -154,12 +154,17 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_DB_PATH` | `/database/bap-search.db` | SQLite database path |
 | `BAP_SUMMARIZE_URL_LIMIT` | `3` | URLs to fetch & summarize per search |
 | `BAP_FETCH_WORKERS` | `3` | Concurrent page fetch workers |
-| `BAP_MAX_EXTRACT_CHARS` | `12000` | Max chars extracted per page |
+| `BAP_FETCH_TIMEOUT_SECONDS` | `10` | Per-URL fetch budget (a slow site can't stall ranking) |
+| `BAP_MAX_EXTRACT_CHARS` | `6000` | Max chars extracted per page |
 | `BAP_MAX_EMBEDDING_TOKENS` | `500` | Max tokens sent to embedding model. Overridable from `/settings`. |
+| `BAP_EMBEDDING_BATCH_SIZE` | `4` | Documents per embeddings HTTP call (per-item fallback on failure). Overridable from `/settings`. |
 | `BAP_QUERY_REFORMULATIONS` | `0` | Number of query reformulations to generate (0 = disabled). Overridable from `/settings`. |
 | `BAP_CHAT_CONTEXT_CHARS` | `4200` | Conversation context for follow-ups |
 | `BAP_MAX_CHAT_MESSAGES` | `8` | Max messages in chat context |
-| `BAP_SUMMARY_WORKERS` | `1` | Concurrent summary pipeline workers |
+| `BAP_SUMMARY_WORKERS` | `1` | Concurrent heavy-stage (fetch/embed/rank) workers |
+| `BAP_SEARCH_WORKERS` | `4` | Concurrent fast-stage (SearXNG) workers |
+| `LLAMA_ANSWER_SPEC_TYPE` | *(empty)* | Speculative decoding for the answer model: `ngram-mod` (any model) or `draft-mtp` (MTP-native models, llama.cpp ≥ b9274). See `docker/.env.example`. |
+| `LLAMA_ANSWER_CACHE_REUSE` | `256` | llama.cpp `--cache-reuse` KV prefix reuse (0 disables) |
 | `BAP_CONTEXT_DOC_COUNT` | `5` | Top-ranked sources included in answer context |
 | `BAP_RESULTS_DISPLAY_LIMIT` | `10` | Max search result cards shown in the UI |
 | `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |

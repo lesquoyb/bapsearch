@@ -522,6 +522,13 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		fl.Flush()
 	}
+	writeData := func(data string) {
+		encoded, _ := json.Marshal(data)
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	}
 
 	// Keepalive goroutine: prevents the browser from dropping the SSE connection
 	// during the silent period between reasoning tokens and the final reply.
@@ -577,16 +584,20 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 	currentQuery := readyConversation.RewrittenQuery
 	var reply string
 	var reasoningBuf strings.Builder
+	var guard *answerStreamGuard
 	didInlineSearch := false
 
 	for searchLoop < maxSearchLoops {
 		replyMeta := RequestMeta{RequestID: meta.RequestID, UserID: meta.UserID, ConversationID: conversationID}
 
 		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
+		// Forward answer tokens live; the guard withholds anything that could
+		// be a <<NEED_MORE_SEARCH>> marker so the user never sees it.
+		guard = newAnswerStreamGuard(writeData)
 		reply, err = app.llm.GenerateGroundedSearchAnswerStream(r.Context(), replyMeta, readyConversation.Title, currentQuery, currentSources, func(token string) {
 			reasoningBuf.WriteString(token)
 			batchedReasoning(token)
-		})
+		}, guard.OnToken)
 		flushReasoning()
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("grounded answer generation failed", "error", err)
@@ -653,11 +664,9 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 
 		cleaned := stripNeedMoreSearch(reply)
 		if cleaned != "" {
-			encoded, _ := json.Marshal(cleaned)
-			writeMu.Lock()
-			fmt.Fprintf(w, "data: %s\n\n", encoded)
-			fl.Flush()
-			writeMu.Unlock()
+			if guard == nil || !guard.Finalize(cleaned) {
+				writeData(cleaned)
+			}
 			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
 			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated (search limit reached).")
 		}
@@ -666,11 +675,11 @@ func (app *App) handleConversationAnswerStream(w http.ResponseWriter, r *http.Re
 		writeEvent("done", "")
 		return
 	}
-	encoded, _ := json.Marshal(reply)
-	writeMu.Lock()
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-	fl.Flush()
-	writeMu.Unlock()
+	// Tokens were already streamed live; only send the reply as a single event
+	// when nothing could be streamed (e.g. the whole reply was withheld).
+	if guard == nil || !guard.Finalize(reply) {
+		writeData(reply)
+	}
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("storing assistant answer failed", "error", err)
@@ -745,6 +754,11 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		fl.Flush()
 	}
+	writeData := func(data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	}
 
 	replyMeta := RequestMeta{
 		RequestID:      meta.RequestID,
@@ -755,14 +769,16 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 	maxChatSearchLoops := app.maxSearchLoops(r.Context())
 	var reply string
 	var reasoningBuf strings.Builder
+	var guard *answerStreamGuard
 	didInlineSearch := false
 
 	for loop := 0; loop < maxChatSearchLoops; loop++ {
 		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
+		guard = newAnswerStreamGuard(writeData)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
 			batchedReasoning(token)
-		})
+		}, guard.OnToken)
 		flushReasoning()
 
 		if err != nil {
@@ -831,9 +847,9 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 
 		cleaned := stripNeedMoreSearch(reply)
 		if cleaned != "" {
-			encoded, _ := json.Marshal(cleaned)
-			fmt.Fprintf(w, "data: %s\n\n", encoded)
-			fl.Flush()
+			if guard == nil || !guard.Finalize(cleaned) {
+				writeData(cleaned)
+			}
 			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
 		}
 
@@ -841,9 +857,9 @@ func (app *App) handleConversationMessageStream(w http.ResponseWriter, r *http.R
 		writeEvent("done", "")
 		return
 	}
-	encoded, _ := json.Marshal(reply)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-	fl.Flush()
+	if guard == nil || !guard.Finalize(reply) {
+		writeData(reply)
+	}
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store streamed reply", "error", err)
@@ -912,6 +928,11 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		fl.Flush()
 	}
+	writeData := func(data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	}
 
 	replyMeta := RequestMeta{
 		RequestID:      meta.RequestID,
@@ -922,14 +943,16 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 	maxChatSearchLoops := app.maxSearchLoops(r.Context())
 	var reply string
 	var reasoningBuf strings.Builder
+	var guard *answerStreamGuard
 	didInlineSearch := false
 
 	for loop := 0; loop < maxChatSearchLoops; loop++ {
 		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
+		guard = newAnswerStreamGuard(writeData)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
 			batchedReasoning(token)
-		})
+		}, guard.OnToken)
 		flushReasoning()
 
 		if err != nil {
@@ -993,9 +1016,9 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 
 		cleaned := stripNeedMoreSearch(reply)
 		if cleaned != "" {
-			encoded, _ := json.Marshal(cleaned)
-			fmt.Fprintf(w, "data: %s\n\n", encoded)
-			fl.Flush()
+			if guard == nil || !guard.Finalize(cleaned) {
+				writeData(cleaned)
+			}
 			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
 		}
 
@@ -1004,9 +1027,9 @@ func (app *App) handleConversationMessageRegenerateStream(w http.ResponseWriter,
 		return
 	}
 
-	encoded, _ := json.Marshal(reply)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-	fl.Flush()
+	if guard == nil || !guard.Finalize(reply) {
+		writeData(reply)
+	}
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("failed to store regenerated reply", "error", err)
@@ -1076,16 +1099,24 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
+	writeData := func(data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	}
+
 	var reply string
 	var reasoningBuf strings.Builder
+	var guard *answerStreamGuard
 	maxLoops := app.maxSearchLoops(r.Context())
 
 	for loop := 0; loop < maxLoops; loop++ {
 		batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
+		guard = newAnswerStreamGuard(writeData)
 		reply, err = app.llm.GenerateConversationReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 			reasoningBuf.WriteString(token)
 			batchedReasoning(token)
-		})
+		}, guard.OnToken)
 		flushReasoning()
 		if err != nil {
 			loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more generation failed", "error", err)
@@ -1132,9 +1163,9 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 
 		cleaned := stripNeedMoreSearch(reply)
 		if cleaned != "" {
-			encoded, _ := json.Marshal(cleaned)
-			fmt.Fprintf(w, "data: %s\n\n", encoded)
-			fl.Flush()
+			if guard == nil || !guard.Finalize(cleaned) {
+				writeData(cleaned)
+			}
 			_ = app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", cleaned, reasoningBuf.String())
 			_ = app.conversations.UpdateAnswerStatus(context.Background(), conversationID, "complete", "Answer generated after additional search.")
 		}
@@ -1144,9 +1175,9 @@ func (app *App) handleSearchMoreStream(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
-	encoded, _ := json.Marshal(reply)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-	fl.Flush()
+	if guard == nil || !guard.Finalize(reply) {
+		writeData(reply)
+	}
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("search-more storing reply failed", "error", err)
@@ -1200,12 +1231,19 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 		history = []LLMMessage{{Role: "user", Content: conv.Title}}
 	}
 
+	writeData := func(data string) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "data: %s\n\n", encoded)
+		fl.Flush()
+	}
+
 	var reasoningBuf strings.Builder
 	batchedReasoning, flushReasoning := makeBatchedReasoningCallback(writeEvent, 200)
+	guard := newAnswerStreamGuard(writeData)
 	reply, err := app.llm.GenerateConversationForceReplyStream(r.Context(), replyMeta, memorySummary, contextText, history, func(token string) {
 		reasoningBuf.WriteString(token)
 		batchedReasoning(token)
-	})
+	}, guard.OnToken)
 	flushReasoning()
 	if err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("force-answer generation failed", "error", err)
@@ -1213,9 +1251,9 @@ func (app *App) handleForceAnswerStream(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	encoded, _ := json.Marshal(reply)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
-	fl.Flush()
+	if !guard.Finalize(reply) {
+		writeData(reply)
+	}
 
 	if err := app.conversations.AddMessageWithReasoning(context.Background(), conversationID, "assistant", reply, reasoningBuf.String()); err != nil {
 		loggerWithMeta(r.Context(), app.logger, conversationID).Error("force-answer storing reply failed", "error", err)

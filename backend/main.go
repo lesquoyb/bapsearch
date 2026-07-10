@@ -40,6 +40,8 @@ type Config struct {
 	SummarizeURLLimit    int
 	MaxExtractChars      int
 	MaxEmbeddingTokens    int
+	EmbeddingBatchSize   int
+	FetchTimeoutSeconds  int
 	FetchWorkers         int
 	SearchWorkers        int
 	SummaryWorkers       int
@@ -266,14 +268,14 @@ func main() {
 		maxResponseTokens: cfg.LLMMaxResponseTokens,
 		contextTokens:     cfg.LLMContextTokens,
 		maxEmbeddingTokens: cfg.MaxEmbeddingTokens,
-		embeddingBatchSize: 1,
+		embeddingBatchSize: cfg.EmbeddingBatchSize,
 		enableThinking:    false,
 		reasoningBudget:   2048,
 		temperature:       0.2,
 		topP:              1.0,
 		topK:              40,
 	}
-	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.TrafilaturaURL, cfg.FetchWorkers, cfg.MaxExtractChars)
+	fetchService := NewFetchService(logger, cfg.TrafilaturaPath, cfg.TrafilaturaURL, cfg.FetchWorkers, cfg.MaxExtractChars, cfg.FetchTimeoutSeconds)
 	memoryService := &MemoryService{db: db, llm: llm, conversations: conversations, logger: logger}
 	eventBroker := NewEventBroker()
 	cancellations := NewCancellations()
@@ -433,6 +435,11 @@ func (app *App) loadSettingsFromDB() {
 			app.cfg.QueryReformulations = n
 			app.summarize.queryReformulations = n
 		}
+	} else {
+		// Cleared from the settings page: fall back to the env default.
+		fallback := envOrDefaultInt("BAP_QUERY_REFORMULATIONS", 0)
+		app.cfg.QueryReformulations = fallback
+		app.summarize.queryReformulations = fallback
 	}
 
 	// Per-call-type sampling overrides. Each profile pulls three optional
@@ -709,12 +716,17 @@ func loadConfig() Config {
 		SummarizeURLLimit:    envOrDefaultInt("BAP_SUMMARIZE_URL_LIMIT", 3),
 		MaxExtractChars:      envOrDefaultInt("BAP_MAX_EXTRACT_CHARS", 6000),
 		MaxEmbeddingTokens:    envOrDefaultInt("BAP_MAX_EMBEDDING_TOKENS", 500),
+		// Batching documents into one embeddings call removes most of the
+		// per-call overhead; EmbedTexts falls back to per-item embedding when a
+		// batch fails, so a larger default is safe even on small servers.
+		EmbeddingBatchSize:   envOrDefaultInt("BAP_EMBEDDING_BATCH_SIZE", 4),
+		FetchTimeoutSeconds:  envOrDefaultInt("BAP_FETCH_TIMEOUT_SECONDS", 10),
 		FetchWorkers:         envOrDefaultInt("BAP_FETCH_WORKERS", 3),
 		SearchWorkers:        envOrDefaultInt("BAP_SEARCH_WORKERS", 4),
 		SummaryWorkers:       envOrDefaultInt("BAP_SUMMARY_WORKERS", 1),
 		SummaryQueueSize:     envOrDefaultInt("BAP_SUMMARY_QUEUE", 32),
 		ContextDocCount:      envOrDefaultInt("BAP_CONTEXT_DOC_COUNT", 5),
-		ChatContextChars:     envOrDefaultInt("BAP_CHAT_CONTEXT_CHARS", 12000),
+		ChatContextChars:     envOrDefaultInt("BAP_CHAT_CONTEXT_CHARS", 4200),
 		MaxChatMessages:      envOrDefaultInt("BAP_MAX_CHAT_MESSAGES", 8),
 		ResultsDisplayLimit:  envOrDefaultInt("BAP_RESULTS_DISPLAY_LIMIT", 10),
 		LLMMaxResponseTokens: envOrDefaultInt("BAP_LLM_MAX_TOKENS", 700),

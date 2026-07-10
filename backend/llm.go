@@ -140,6 +140,11 @@ type llamaChatRequest struct {
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	ReasoningBudget    *int           `json:"reasoning_budget,omitempty"`
 	Stream             bool           `json:"stream"`
+	// CachePrompt asks llama.cpp to keep the processed prompt in its KV cache
+	// and reuse the common prefix on the next call. Grounded answers and their
+	// follow-ups share a long system+sources prefix, so this skips most of the
+	// prompt-processing cost on every call after the first.
+	CachePrompt bool `json:"cache_prompt"`
 }
 
 // CallProfile names a sampling profile used to pick per-call-type temperature,
@@ -972,7 +977,7 @@ func (service *LLMService) embedBatch(ctx context.Context, meta RequestMeta, inp
 	return vectors, nil
 }
 
-func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onReasoning func(string)) (string, error) {
+func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Context, meta RequestMeta, originalQuery, rewrittenQuery string, sources []RankedSource, onReasoning, onToken func(string)) (string, error) {
 	blocks := make([]string, 0, len(sources))
 	for index, source := range sources {
 		if strings.TrimSpace(source.SourceText) == "" {
@@ -996,7 +1001,16 @@ func (service *LLMService) GenerateGroundedSearchAnswerStream(ctx context.Contex
 		{Role: "user", Content: fmt.Sprintf("Original user query: %s\nOptimized search query: %s\n\nTop ranked sources:\n\n%s", originalQuery, targetQuery, strings.Join(blocks, "\n\n"))},
 	}
 
-	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, streamTokenCallback(onToken))
+}
+
+// streamTokenCallback normalizes a possibly-nil token callback so generators
+// can be called with or without live token forwarding.
+func streamTokenCallback(onToken func(string)) func(string) {
+	if onToken == nil {
+		return func(string) {}
+	}
+	return onToken
 }
 
 func (service *LLMService) GenerateConversationReply(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage) (string, string, error) {
@@ -1017,7 +1031,7 @@ func (service *LLMService) GenerateConversationReply(ctx context.Context, meta R
 	return reply, reasoningBuf.String(), err
 }
 
-func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning func(string)) (string, error) {
+func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning, onToken func(string)) (string, error) {
 	messages := []LLMMessage{
 		buildSystemMessage(
 			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
@@ -1028,10 +1042,10 @@ func (service *LLMService) GenerateConversationReplyStream(ctx context.Context, 
 	}
 
 	messages = append(messages, history...)
-	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, streamTokenCallback(onToken))
 }
 
-func (service *LLMService) GenerateConversationForceReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning func(string)) (string, error) {
+func (service *LLMService) GenerateConversationForceReplyStream(ctx context.Context, meta RequestMeta, userMemory, searchContext string, history []LLMMessage, onReasoning, onToken func(string)) (string, error) {
 	messages := []LLMMessage{
 		buildSystemMessage(
 			strings.TrimSpace(service.Prompts.get(&service.Prompts.Chat, DefaultPromptChat)),
@@ -1042,7 +1056,7 @@ func (service *LLMService) GenerateConversationForceReplyStream(ctx context.Cont
 	}
 
 	messages = append(messages, history...)
-	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, func(string) {})
+	return service.chatStreamWithURL(ctx, service.baseURL, meta, messages, -1, service.enableThinking, onReasoning, streamTokenCallback(onToken))
 }
 
 func (service *LLMService) UpdateUserMemory(ctx context.Context, meta RequestMeta, currentMemory, transcript string) (string, error) {
@@ -1071,6 +1085,7 @@ func (service *LLMService) newLlamaChatRequestForProfile(messages []LLMMessage, 
 		TopK:        params.TopK,
 		MaxTokens:   maxTokens,
 		Stream:      stream,
+		CachePrompt: true,
 	}
 	if enableThinking {
 		budget := service.reasoningBudget

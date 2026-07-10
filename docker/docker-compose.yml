@@ -162,14 +162,20 @@ services:
       LLAMA_CPP_EMBEDDINGS_URL: ${LLAMA_CPP_EMBEDDINGS_URL:-http://llama-embeddings:8080/v1/embeddings}
       BAP_SUMMARIZE_URL_LIMIT: ${BAP_SUMMARIZE_URL_LIMIT:-3}
       BAP_FETCH_WORKERS: ${BAP_FETCH_WORKERS:-3}
+      # Per-URL fetch budget; a slow site no longer holds ranking for 20s.
+      BAP_FETCH_TIMEOUT_SECONDS: ${BAP_FETCH_TIMEOUT_SECONDS:-10}
       BAP_SUMMARY_WORKERS: ${BAP_SUMMARY_WORKERS:-1}
       BAP_SEARCH_WORKERS: ${BAP_SEARCH_WORKERS:-4}
-      BAP_MAX_EXTRACT_CHARS: ${BAP_MAX_EXTRACT_CHARS:-12000}
+      # Keep in sync with the backend default (the answer prompt truncates each
+      # source to ~3000 chars anyway, so 6000 loses nothing).
+      BAP_MAX_EXTRACT_CHARS: ${BAP_MAX_EXTRACT_CHARS:-6000}
       # In-container long-lived trafilatura extractor (started by the entrypoint).
       # Set empty to force the per-page CLI; BAP_TRAFILATURA_DISABLE_SERVICE=true
       # also stops the entrypoint from launching it.
       BAP_TRAFILATURA_URL: ${BAP_TRAFILATURA_URL:-http://127.0.0.1:8090/extract}
       BAP_MAX_EMBEDDING_TOKENS: ${BAP_MAX_EMBEDDING_TOKENS:-500}
+      # Documents per embeddings HTTP call (falls back to per-item on failure).
+      BAP_EMBEDDING_BATCH_SIZE: ${BAP_EMBEDDING_BATCH_SIZE:-4}
       BAP_CHAT_CONTEXT_CHARS: ${BAP_CHAT_CONTEXT_CHARS:-4200}
       BAP_MAX_CHAT_MESSAGES: ${BAP_MAX_CHAT_MESSAGES:-8}
       BAP_LLM_MAX_TOKENS: ${BAP_LLM_MAX_TOKENS:-700}
@@ -207,6 +213,15 @@ services:
       LLAMA_MAIN_GPU: ${LLAMA_ANSWER_MAIN_GPU:-0}
       LLAMA_FLASH_ATTN: ${LLAMA_ANSWER_FLASH_ATTN:-false}
       LLAMA_EXTRA_ARGS: ${LLAMA_ANSWER_EXTRA_ARGS:---mlock}
+      # KV prefix reuse between calls sharing a prompt prefix (0 disables).
+      LLAMA_CACHE_REUSE: ${LLAMA_ANSWER_CACHE_REUSE:-256}
+      # Speculative decoding: empty (off), "ngram-mod" (any model, great for
+      # grounded answers), or "draft-mtp" (MTP-native models: Qwen3.5/3.6,
+      # DeepSeek V3/R1, Gemma 4). The entrypoint falls back to no-spec if the
+      # server can't start with it. See docker/.env.example.
+      LLAMA_SPEC_TYPE: ${LLAMA_ANSWER_SPEC_TYPE:-}
+      LLAMA_SPEC_DRAFT_MODEL: ${LLAMA_ANSWER_SPEC_DRAFT_MODEL:-}
+      LLAMA_SPEC_DRAFT_N_MAX: ${LLAMA_ANSWER_SPEC_DRAFT_N_MAX:-}
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-5}
       LLAMA_AUTO_RELOAD_MODEL: ${LLAMA_AUTO_RELOAD_MODEL:-true}
     entrypoint: ["/bin/sh", "/config/llama-entrypoint.sh"]

@@ -26,6 +26,29 @@ EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 POLL_SECONDS="${MODEL_POLL_SECONDS:-5}"
 AUTO_RELOAD_MODEL="${LLAMA_AUTO_RELOAD_MODEL:-true}"
 
+# KV-cache prefix reuse across requests (--cache-reuse N). Grounded answers
+# and their follow-ups share a long system+sources prefix, so reusing it skips
+# most prompt processing. Empty or 0 disables the flag.
+CACHE_REUSE="${LLAMA_CACHE_REUSE:-}"
+
+# Speculative decoding (needs a llama.cpp build with --spec-type, >= b9274 for
+# a leak-free MTP). Examples:
+#   LLAMA_SPEC_TYPE=ngram-mod   draftless n-gram lookup; works with ANY model,
+#                               shines on grounded/RAG answers that quote the
+#                               sources present in the prompt.
+#   LLAMA_SPEC_TYPE=draft-mtp   the model's own MTP heads; MTP-native models
+#                               only (Qwen3.5/3.6, DeepSeek V3/R1, Gemma 4...).
+# LLAMA_SPEC_DRAFT_MODEL names a .gguf in the models dir for the draft-* types
+# that need a separate draft model. If llama-server dies right after start
+# twice in a row, the spec flags are dropped automatically so a model without
+# MTP heads (or an old build) still serves.
+SPEC_TYPE="${LLAMA_SPEC_TYPE:-}"
+SPEC_DRAFT_MODEL="${LLAMA_SPEC_DRAFT_MODEL:-}"
+SPEC_DRAFT_N_MAX="${LLAMA_SPEC_DRAFT_N_MAX:-}"
+spec_disabled=0
+spec_fail_count=0
+server_started_at=0
+
 normalize_ngl() {
   value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | xargs)"
   # Legacy: many docs used 999 to mean "offload as much as possible".
@@ -93,6 +116,21 @@ start_server() {
       ;;
   esac
 
+  if [ -n "$CACHE_REUSE" ] && [ "$CACHE_REUSE" != "0" ]; then
+    set -- "$@" --cache-reuse "$CACHE_REUSE"
+  fi
+
+  if [ -n "$SPEC_TYPE" ] && [ "$spec_disabled" -eq 0 ]; then
+    set -- "$@" --spec-type "$SPEC_TYPE"
+    if [ -n "$SPEC_DRAFT_MODEL" ]; then
+      set -- "$@" --spec-draft-model "$MODEL_DIR/$SPEC_DRAFT_MODEL"
+    fi
+    if [ -n "$SPEC_DRAFT_N_MAX" ]; then
+      set -- "$@" --spec-draft-n-max "$SPEC_DRAFT_N_MAX"
+    fi
+    echo "Speculative decoding enabled: --spec-type $SPEC_TYPE"
+  fi
+
   if [ -n "$EXTRA_ARGS" ]; then
     # shellcheck disable=SC2086
     set -- "$@" $EXTRA_ARGS
@@ -100,6 +138,7 @@ start_server() {
 
   "$SERVER_BIN" "$@" &
   child_pid=$!
+  server_started_at="$(date +%s)"
   active_model="$model_path"
 }
 
@@ -122,8 +161,25 @@ while true; do
 
     if [ "$desired_model" != "$active_model" ]; then
       stop_server
+      # A different model may well support speculative decoding: try again.
+      spec_fail_count=0
+      spec_disabled=0
       start_server "$desired_model"
     elif [ -n "$child_pid" ] && ! kill -0 "$child_pid" 2>/dev/null; then
+      # Crashed. If speculative decoding is on and the server keeps dying
+      # right after start, assume the model/build doesn't support it and
+      # retry without the spec flags instead of crash-looping forever.
+      uptime="$(( $(date +%s) - server_started_at ))"
+      if [ -n "$SPEC_TYPE" ] && [ "$spec_disabled" -eq 0 ] && [ "$uptime" -lt 30 ]; then
+        spec_fail_count=$((spec_fail_count + 1))
+        if [ "$spec_fail_count" -ge 2 ]; then
+          echo "llama-server died ${uptime}s after start twice with --spec-type $SPEC_TYPE;"
+          echo "disabling speculative decoding for this model (missing MTP heads or old build?)."
+          spec_disabled=1
+        fi
+      else
+        spec_fail_count=0
+      fi
       start_server "$desired_model"
     fi
   else

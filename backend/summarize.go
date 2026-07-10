@@ -259,20 +259,7 @@ func (service *SummarizeService) runProcessStage(job ProcessJob) {
 		logger.Info("process_stage_capped", "fetched", maxFetch, "skipped", len(job.Results)-maxFetch)
 	}
 
-	if err := service.processResults(jobContext, meta, logger, job.ConversationID, toProcess); err != nil {
-		service.failPipeline(jobContext, logger, job.ConversationID, err)
-		return
-	}
-
 	query := strings.TrimSpace(job.Query)
-	if err := service.conversations.StoreRewrittenQuery(jobContext, job.ConversationID, query); err != nil {
-		logger.Error("persisting query failed", "error", err)
-	}
-
-	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings."); err != nil {
-		logger.Error("updating answer status failed", "error", err)
-	}
-	service.publishPipeline(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings.")
 
 	// Build the embedding text: repeat the original query once per reformulation
 	// then append each reformulation. This gives the original query N× more
@@ -288,11 +275,38 @@ func (service *SummarizeService) runProcessStage(job ProcessJob) {
 		embeddingText = strings.Join(parts, " ")
 	}
 
-	queryEmbedding, err := service.llm.EmbedText(jobContext, meta, embeddingText)
-	if err != nil {
-		service.failPipeline(jobContext, logger, job.ConversationID, fmt.Errorf("query embedding failed: %w", err))
+	// The query embedding doesn't depend on the fetched documents, so compute
+	// it while the fetch/extract/embed loop runs instead of after it.
+	type queryEmbedResult struct {
+		vector []float64
+		err    error
+	}
+	queryEmbedCh := make(chan queryEmbedResult, 1)
+	go func() {
+		vector, err := service.llm.EmbedText(jobContext, meta, embeddingText)
+		queryEmbedCh <- queryEmbedResult{vector: vector, err: err}
+	}()
+
+	if err := service.processResults(jobContext, meta, logger, job.ConversationID, toProcess); err != nil {
+		service.failPipeline(jobContext, logger, job.ConversationID, err)
 		return
 	}
+
+	if err := service.conversations.StoreRewrittenQuery(jobContext, job.ConversationID, query); err != nil {
+		logger.Error("persisting query failed", "error", err)
+	}
+
+	if err := service.conversations.UpdateAnswerStatus(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings."); err != nil {
+		logger.Error("updating answer status failed", "error", err)
+	}
+	service.publishPipeline(jobContext, job.ConversationID, "ranking", "Ranking sources with query and document embeddings.")
+
+	queryEmbed := <-queryEmbedCh
+	if queryEmbed.err != nil {
+		service.failPipeline(jobContext, logger, job.ConversationID, fmt.Errorf("query embedding failed: %w", queryEmbed.err))
+		return
+	}
+	queryEmbedding := queryEmbed.vector
 
 	rankedSources, err := service.rankSources(jobContext, logger, job.ConversationID, queryEmbedding)
 	if err != nil {

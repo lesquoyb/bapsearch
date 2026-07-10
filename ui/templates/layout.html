@@ -407,6 +407,8 @@
             } else if (dataLine) {
               try {
                 var token = JSON.parse(dataLine);
+                // First token: drop any status text shown while waiting.
+                if (!accumulated) aBody.textContent = '';
                 bapClearTypingDots(aBody);
                 bapAppendToken(aBody, token);
                 accumulated += token;
@@ -615,7 +617,11 @@
               } else if (dataLine) {
                 try {
                   var token = JSON.parse(dataLine);
-                  if (!accumulated) bapAutoSwitchToSplit();
+                  if (!accumulated) {
+                    bapAutoSwitchToSplit();
+                    // First token: drop any status text shown while waiting.
+                    aBody.textContent = '';
+                  }
                   bapClearTypingDots(aBody);
                   bapAppendToken(aBody, token);
                   accumulated += token;
@@ -944,6 +950,8 @@
             } else if (dataLine) {
               try {
                 var token = JSON.parse(dataLine);
+                // First token: drop any status text shown while waiting.
+                if (!accumulated) aBody.textContent = '';
                 bapClearTypingDots(aBody);
                 bapAppendToken(aBody, token);
                 accumulated += token;

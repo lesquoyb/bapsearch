@@ -141,12 +141,14 @@ func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"enable_thinking":      app.conversations.GetSetting(ctx, "enable_thinking", "false"),
 		"reasoning_budget":     app.conversations.GetSetting(ctx, "reasoning_budget", "2048"),
 		"max_embedding_tokens": app.conversations.GetSetting(ctx, "max_embedding_tokens", "500"),
-		"embedding_batch_size": app.conversations.GetSetting(ctx, "embedding_batch_size", "1"),
+		"embedding_batch_size": app.conversations.GetSetting(ctx, "embedding_batch_size", "4"),
 		"query_reformulations": app.conversations.GetSetting(ctx, "query_reformulations", ""),
 		"rewrite_temperature":  app.conversations.GetSetting(ctx, "rewrite_temperature", ""),
 		"rewrite_top_p":        app.conversations.GetSetting(ctx, "rewrite_top_p", ""),
 		"rewrite_top_k":        app.conversations.GetSetting(ctx, "rewrite_top_k", ""),
 		"utility_temperature":  app.conversations.GetSetting(ctx, "utility_temperature", ""),
+		"utility_top_p":        app.conversations.GetSetting(ctx, "utility_top_p", ""),
+		"utility_top_k":        app.conversations.GetSetting(ctx, "utility_top_k", ""),
 		"summarize_url_limit":  app.conversations.GetSetting(ctx, "summarize_url_limit", "3"),
 		"max_extract_chars":    app.conversations.GetSetting(ctx, "max_extract_chars", "6000"),
 		"fetch_workers":        app.conversations.GetSetting(ctx, "fetch_workers", "3"),
@@ -193,15 +195,23 @@ func (app *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"max_embedding_tokens", "embedding_batch_size",
 		"query_reformulations",
 		"rewrite_temperature", "rewrite_top_p", "rewrite_top_k",
-		"utility_temperature",
+		"utility_temperature", "utility_top_p", "utility_top_k",
 		"summarize_url_limit", "max_extract_chars", "fetch_workers",
 		"chat_context_chars", "max_chat_messages", "max_search_loops",
 		"context_doc_count", "results_display_limit",
 		"prompt_chat", "prompt_memory",
 	}
+	// Optional override keys: submitting an empty value means "clear the
+	// override and fall back to the global/env default", so the empty value
+	// must be persisted — unlike the main settings where empty means "keep".
+	clearableKeys := map[string]bool{
+		"rewrite_temperature": true, "rewrite_top_p": true, "rewrite_top_k": true,
+		"utility_temperature": true, "utility_top_p": true, "utility_top_k": true,
+		"query_reformulations": true,
+	}
 	for _, key := range dbKeys {
 		val := strings.TrimSpace(r.FormValue(key))
-		if val != "" {
+		if val != "" || clearableKeys[key] {
 			_ = app.conversations.SetSetting(ctx, key, val)
 		}
 	}

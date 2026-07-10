@@ -90,6 +90,51 @@ Deferred: R6 (embedding batch-size default — presets already set it per tier).
 
 ---
 
+## Round 2 (July 2026) — perceived latency & generation speed
+
+Measured by the reproducible harness in `backend/latency_bench_test.go`
+(`go test -run TestLatency -v`), which wires the real pipeline to fake
+SearXNG/llama.cpp/trafilatura servers with controlled delays.
+
+- **Answer tokens now stream to the browser as they are generated.** All four
+  SSE paths (initial answer, chat, regenerate, force-answer) previously
+  buffered the entire LLM reply and sent it as ONE event at the end — the
+  `onToken` callback was a no-op — because a reply can be a
+  `<<NEED_MORE_SEARCH>>` action that must never be shown. A new
+  `answerStreamGuard` (`stream_guard.go`) emits tokens live while withholding
+  any suffix that could still become a marker (or a stray `<think>` block),
+  freezing if one is confirmed; `Finalize` reconciles with the stored reply so
+  nothing is duplicated. Harness: first visible token at ~12% of total
+  generation time instead of 100%.
+- **Speculative decoding / MTP support in the llama-answer service.**
+  `LLAMA_ANSWER_SPEC_TYPE` (entrypoint: `--spec-type`) with `ngram-mod`
+  enabled in the `.env` examples (draftless, works with any model, strong on
+  grounded answers that quote prompt sources) and `draft-mtp` documented for
+  MTP-native models (Qwen3.5/3.6, DeepSeek V3/R1, Gemma 4; needs image ≥
+  b9274 — the MTP VRAM-leak fix). The entrypoint auto-disables the spec flags
+  after two immediate startup deaths so an unsupported model still serves.
+- **KV prefix reuse.** Requests set `cache_prompt: true` and the server runs
+  `--cache-reuse 256` (`LLAMA_ANSWER_CACHE_REUSE`): follow-ups and search
+  loops share the long system+sources prefix and skip most prompt processing.
+- **R6 done: embedding batching by default.** `embedding_batch_size` defaults
+  to 4 (`BAP_EMBEDDING_BATCH_SIZE`), safe because `EmbedTexts` degrades to
+  per-item on batch failure. Harness: ready-to-rank in half the time, half
+  the HTTP calls on a 6-doc workload.
+- **Query embedding in parallel.** The composite query embedding is computed
+  concurrently with the fetch/extract/embed loop instead of after it
+  (`summarize.go runProcessStage`).
+- **Per-URL fetch budget 20s → 10s**, configurable via
+  `BAP_FETCH_TIMEOUT_SECONDS`; one slow site no longer stalls ranking.
+- **Config drift fixed.** compose no longer overrides `max_extract_chars`
+  back to 12000; `chat_context_chars` default unified at 4200 everywhere;
+  stale `BAP_MAX_EMBEDDING_CHARS` removed from the `.env` examples.
+- **Settings page fixes (axis 2, in passing).** Utility top-p/top-k overrides
+  are now editable and saved; clearing an override field actually clears it
+  (previously empty values were silently ignored); defaults shown by the ↻
+  reset buttons match the real defaults.
+
+---
+
 ## How to measure (before changing anything)
 
 The app already logs durations to the mounted volume — use them to quantify

@@ -43,7 +43,13 @@ type FetchService struct {
 	cache             *PageCache
 }
 
-func NewFetchService(logger *slog.Logger, trafilaturaPath, trafilaturaURL string, workerCount, maxExtractChars int) *FetchService {
+func NewFetchService(logger *slog.Logger, trafilaturaPath, trafilaturaURL string, workerCount, maxExtractChars, fetchTimeoutSeconds int) *FetchService {
+	// One slow site used to hold the whole ranking phase for its full 20s
+	// timeout; a shorter, configurable budget keeps the pipeline responsive
+	// (the search snippet remains as fallback content for the slow page).
+	if fetchTimeoutSeconds <= 0 {
+		fetchTimeoutSeconds = 10
+	}
 	return &FetchService{
 		logger:          logger,
 		trafilaturaPath: trafilaturaPath,
@@ -51,7 +57,7 @@ func NewFetchService(logger *slog.Logger, trafilaturaPath, trafilaturaURL string
 		workerCount:     workerCount,
 		maxExtractChars: maxExtractChars,
 		client: &http.Client{
-			Timeout: 20 * time.Second,
+			Timeout: time.Duration(fetchTimeoutSeconds) * time.Second,
 		},
 		trafilaturaClient: &http.Client{
 			Timeout: 30 * time.Second,
