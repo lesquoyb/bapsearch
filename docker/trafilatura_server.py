@@ -17,6 +17,11 @@ import trafilatura
 
 MAX_BYTES = 16 * 1024 * 1024  # reject absurdly large bodies
 
+# fast=True skips trafilatura's fallback extraction algorithms: ~30% faster
+# with identical output on most pages (see bench/README.md); forum-style pages
+# may extract a bit less. Set TRAFILATURA_FAST=false to restore full mode.
+FAST = os.environ.get("TRAFILATURA_FAST", "true").strip().lower() in ("1", "true", "yes", "on")
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # keep connections alive across pages
@@ -50,7 +55,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             html = raw.decode("utf-8", errors="replace")
             # Mirror the CLI default (main text, txt output).
-            text = trafilatura.extract(html) or ""
+            text = trafilatura.extract(html, fast=FAST) or ""
+            if not text and FAST:
+                # The fast path found nothing: give the fallback algorithms a
+                # chance before declaring the page empty.
+                text = trafilatura.extract(html) or ""
         except Exception as exc:  # noqa: BLE001 - never crash the worker thread
             sys.stderr.write("trafilatura extract error: %s\n" % exc)
             self._send(500)

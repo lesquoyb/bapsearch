@@ -71,7 +71,7 @@ This uses `ghcr.io/ggml-org/llama.cpp:server-cuda` with full GPU layer offload.
 3. The original query goes to SearXNG. If `BAP_QUERY_REFORMULATIONS > 0`, the answer model generates alternative phrasings and each is searched in parallel.
 4. All result sets are merged (deduped by URL) and displayed as raw results.
 5. The browser connects to the SSE event stream (`/conversations/{id}/events`) and receives real-time status updates for each card and the overall pipeline.
-6. Top URLs are fetched concurrently (`BAP_FETCH_WORKERS`), cleaned with trafilatura (snippet fallback on failure), and embedded.
+6. Top URLs are fetched concurrently (`BAP_FETCH_WORKERS`), cleaned with trafilatura (snippet fallback on failure), and embedded. Pages that come back blocked (403, JS-challenge stub) are optionally retried through the `fetch-rescue` stealth-browser sidecar (`docker compose --profile fetch-rescue up --build`; heavy image, off by default).
 7. Sources are reranked by cosine similarity against a composite query embedding.
 8. The answer model streams a grounded response with citations from the top sources.
 9. If the model signals it needs more data (`NEED_MORE_SEARCH`), the user is prompted to continue searching or answer with what's available.
@@ -155,6 +155,8 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_SUMMARIZE_URL_LIMIT` | `3` | URLs to fetch & summarize per search |
 | `BAP_FETCH_WORKERS` | `3` | Concurrent page fetch workers |
 | `BAP_FETCH_TIMEOUT_SECONDS` | `10` | Per-URL fetch budget (a slow site can't stall ranking) |
+| `BAP_FETCH_RESCUE_URL` | `http://fetch-rescue:8091/fetch` (compose) | Stealth-fetch sidecar for blocked pages; needs the `fetch-rescue` compose profile, degrades gracefully without it |
+| `TRAFILATURA_FAST` | `true` | trafilatura fast mode (~30% faster, same output on most pages) |
 | `BAP_MAX_EXTRACT_CHARS` | `6000` | Max chars extracted per page |
 | `BAP_MAX_EMBEDDING_TOKENS` | `500` | Max tokens sent to embedding model. Overridable from `/settings`. |
 | `BAP_EMBEDDING_BATCH_SIZE` | `4` | Documents per embeddings HTTP call (per-item fallback on failure). Overridable from `/settings`. |

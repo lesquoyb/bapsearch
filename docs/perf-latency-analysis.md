@@ -133,6 +133,25 @@ SearXNG/llama.cpp/trafilatura servers with controlled delays.
   (previously empty values were silently ignored); defaults shown by the ↻
   reset buttons match the real defaults.
 
+### Round 2b — extraction & blocked pages (bench/README.md)
+
+A benchmark of trafilatura vs Scrapling (`bench/`) concluded: keep
+trafilatura for extraction (Scrapling's text mode returns ALL visible text —
+menus before content — unusable within the 3000-char answer window), and use
+a stealth browser only to FETCH pages that block the plain client.
+
+- **trafilatura `fast=True`** in the extractor service (~30% faster, same
+  output on most pages; automatic retry with full mode when fast extracts
+  nothing). `TRAFILATURA_FAST=false` restores full mode.
+- **`fetch-rescue` sidecar (opt-in compose profile).** When the normal fetch
+  fails or looks blocked (401/403/407/429/503, <2 KB stub, JS-challenge
+  markers), the Go fetcher retries ONCE through a stealth headless browser
+  (Scrapling camoufox) with a 2-concurrent-rescue budget, then extraction
+  proceeds normally. Measured: Le Monde 286-char consent stub → 36,533-char
+  article. Off by default (~2.2 GB image, seconds per rescued page);
+  `docker compose --profile fetch-rescue up --build` enables it, the backend
+  degrades gracefully when it's absent.
+
 ---
 
 ## How to measure (before changing anything)

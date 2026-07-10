@@ -173,6 +173,13 @@ services:
       # Set empty to force the per-page CLI; BAP_TRAFILATURA_DISABLE_SERVICE=true
       # also stops the entrypoint from launching it.
       BAP_TRAFILATURA_URL: ${BAP_TRAFILATURA_URL:-http://127.0.0.1:8090/extract}
+      # fast=True extraction (~30% faster, same output on most pages).
+      TRAFILATURA_FAST: ${TRAFILATURA_FAST:-true}
+      # Stealth-fetch fallback for pages blocked by JS/anti-bot walls. Points
+      # at the optional fetch-rescue sidecar; if that profile isn't running,
+      # the backend degrades gracefully (blocked pages keep today's snippet
+      # fallback). Start it with: docker compose --profile fetch-rescue up
+      BAP_FETCH_RESCUE_URL: ${BAP_FETCH_RESCUE_URL:-http://fetch-rescue:8091/fetch}
       BAP_MAX_EMBEDDING_TOKENS: ${BAP_MAX_EMBEDDING_TOKENS:-500}
       # Documents per embeddings HTTP call (falls back to per-item on failure).
       BAP_EMBEDDING_BATCH_SIZE: ${BAP_EMBEDDING_BATCH_SIZE:-4}
@@ -258,6 +265,29 @@ services:
     volumes:
       - ../models:/models
     networks:
+      - internal
+
+  # Optional stealth-fetch sidecar: loads JS-walled pages in a headless
+  # stealth browser so trafilatura gets real article HTML instead of a
+  # consent/challenge stub (bench/README.md: Le Monde 286 -> 36,533 chars).
+  # Opt-in because the image embeds a browser (~2.2 GB) and each rescued page
+  # costs seconds + RAM:  docker compose --profile fetch-rescue up --build
+  fetch-rescue:
+    container_name: ${FETCH_RESCUE_CONTAINER_NAME:-bapsearch-fetch-rescue}
+    build:
+      context: .
+      dockerfile: fetch-rescue.Dockerfile
+    profiles:
+      - fetch-rescue
+    restart: unless-stopped
+    shm_size: "1gb" # headless Firefox needs a real /dev/shm
+    environment:
+      RESCUE_HOST: 0.0.0.0
+      RESCUE_PORT: 8091
+      RESCUE_CONCURRENCY: ${FETCH_RESCUE_CONCURRENCY:-1}
+      RESCUE_TIMEOUT_MS: ${FETCH_RESCUE_TIMEOUT_MS:-30000}
+    networks:
+      - public
       - internal
 
   searxng:

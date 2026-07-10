@@ -170,7 +170,7 @@ func newBenchServices(t *testing.T, llm *fakeLLM, searxURL, trafilaturaURL strin
 		embeddingBatchSize: batchSize,
 		temperature:        0.2, topP: 1.0, topK: 40,
 	}
-	fetchService := NewFetchService(logger, "trafilatura", trafilaturaURL, 3, 6000, 10)
+	fetchService := NewFetchService(logger, "trafilatura", trafilaturaURL, "", 3, 6000, 10)
 	events := NewEventBroker()
 
 	service := &SummarizeService{
