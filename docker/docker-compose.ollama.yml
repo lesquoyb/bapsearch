@@ -1,0 +1,41 @@
+# Use an EXISTING Ollama instance instead of the bundled llama.cpp containers.
+# Many self-hosters already run their models in Ollama; this override points
+# the backend's OpenAI-compatible calls at it and disables the llama services.
+#
+#   BAP_ANSWER_MODEL=qwen3.5:9b docker compose \
+#     -f docker/docker-compose.yml -f docker/docker-compose.ollama.yml up --build
+#
+# Notes:
+# - Requires Docker Compose >= 2.24 (uses !reset).
+# - OLLAMA_URL defaults to the host's Ollama (host.docker.internal:11434).
+# - Set OLLAMA_KEEP_ALIVE=-1 on the Ollama side so models stay resident
+#   instead of unloading after 5 idle minutes (cold reloads hurt latency).
+# - Ollama keeps several models loaded at once (OLLAMA_MAX_LOADED_MODELS,
+#   default 3), so the answer + embedding pair works like the dual llama.cpp
+#   containers.
+# - Model management (the /settings model pickers, GGUF downloads) stays on
+#   the llama.cpp path; with Ollama you pick models via these env vars and
+#   `ollama pull`.
+services:
+  backend:
+    depends_on: !reset
+      searxng:
+        condition: service_healthy
+    environment:
+      BAP_LLM_PROVIDER: ollama
+      LLAMA_CPP_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}/v1/chat/completions
+      LLAMA_CPP_EMBEDDINGS_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}/v1/embeddings
+      # Ollama routes by model name: the answer model is YOUR choice.
+      BAP_ANSWER_MODEL: ${BAP_ANSWER_MODEL:?set BAP_ANSWER_MODEL to the Ollama model to answer with, e.g. qwen3.5:9b}
+      BAP_EMBEDDING_MODEL: ${BAP_EMBEDDING_MODEL:-nomic-embed-text}
+    extra_hosts:
+      # Reach the host's Ollama from inside the container on Linux too.
+      - "host.docker.internal:host-gateway"
+
+  llama-answer:
+    profiles:
+      - disabled-with-ollama
+
+  llama-embeddings:
+    profiles:
+      - disabled-with-ollama

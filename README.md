@@ -77,6 +77,29 @@ This uses `ghcr.io/ggml-org/llama.cpp:server-cuda` with full GPU layer offload.
 9. If the model signals it needs more data (`NEED_MORE_SEARCH`), the user is prompted to continue searching or answer with what's available.
 10. User memory is refreshed in the background after each conversation.
 
+## Using an existing Ollama instance
+
+If your models already live in Ollama, you can skip the bundled llama.cpp
+containers entirely — the backend talks the OpenAI-compatible protocol both
+expose:
+
+```bash
+BAP_ANSWER_MODEL=qwen3.5:9b BAP_EMBEDDING_MODEL=nomic-embed-text \
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.ollama.yml up --build
+```
+
+- `BAP_ANSWER_MODEL` (required) and `BAP_EMBEDDING_MODEL` (default
+  `nomic-embed-text`) are Ollama model names — pull them first.
+- `OLLAMA_URL` points elsewhere than the host's `:11434` if needed.
+- Set `OLLAMA_KEEP_ALIVE=-1` on the Ollama side so models stay resident
+  (default unload after 5 idle minutes = cold-start latency). Ollama keeps
+  several models loaded at once (`OLLAMA_MAX_LOADED_MODELS`, default 3), so
+  the answer + embeddings pair coexists fine.
+- Trade-offs vs the bundled llama.cpp: no `--spec-type` speculative decoding
+  (Ollama's MTP currently ships on the MLX/Apple Silicon runner, mostly for
+  Gemma 4), no `--cache-reuse`, and the `/settings` model pickers / GGUF
+  downloads don't apply — model choice happens through the env vars above.
+
 ## Multi-model architecture
 
 Two dedicated llama.cpp services run in parallel, each watching its own model file:
@@ -171,8 +194,11 @@ See [docs/authentik.md](docs/authentik.md) for the Authentik provider setup.
 | `BAP_RESULTS_DISPLAY_LIMIT` | `10` | Max search result cards shown in the UI |
 | `BAP_LLM_MAX_TOKENS` | `700` | Max response tokens for utility tasks |
 | `BAP_LLM_CONTEXT_TOKENS` | `8192` | LLM context window size |
-| `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint |
-| `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama-embeddings:8080/v1/embeddings` | Embedding model endpoint |
+| `LLAMA_CPP_URL` | `http://llama-answer:8080/v1/chat/completions` | Answer model endpoint (any OpenAI-compatible server) |
+| `LLAMA_CPP_EMBEDDINGS_URL` | `http://llama-embeddings:8080/v1/embeddings` | Embedding model endpoint (any OpenAI-compatible server) |
+| `BAP_LLM_PROVIDER` | `llamacpp` | `llamacpp` or `ollama` — selects how the model status page probes the server |
+| `BAP_ANSWER_MODEL` | `local` | Model name sent in chat payloads (required by Ollama, ignored by llama.cpp) |
+| `BAP_EMBEDDING_MODEL` | `local` | Model name sent in embedding payloads (required by Ollama, ignored by llama.cpp) |
 | `SEARXNG_SEARCH_URL` | `http://searxng:8080/search` | SearXNG search endpoint |
 | `BAP_LOG_PATH` | `/logs/backend.jsonl` | General structured log file |
 | `BAP_LLM_LOG_PATH` | `/logs/llm.jsonl` | Dedicated LLM trace log (every prompt, response, embedding call) |

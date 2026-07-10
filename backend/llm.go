@@ -25,6 +25,13 @@ type LLMMessage struct {
 type LLMService struct {
 	baseURL           string
 	embeddingsURL     string
+	// answerModel / embedModel are the model names sent in request payloads.
+	// llama.cpp ignores them (it serves whatever is loaded), so "local" is a
+	// fine default; Ollama routes BY this name, so pointing the endpoints at
+	// an Ollama instance requires the real model names (BAP_ANSWER_MODEL /
+	// BAP_EMBEDDING_MODEL).
+	answerModel string
+	embedModel  string
 	client            *http.Client
 	logger            *slog.Logger
 	// llmLogger is a separate logger dedicated to LLM/embedding traffic:
@@ -749,7 +756,7 @@ func (service *LLMService) EmbedText(ctx context.Context, meta RequestMeta, text
 // code and response body alongside any error so the caller can adapt (e.g. on a
 // "too large for the physical batch" rejection).
 func (service *LLMService) embedOnce(ctx context.Context, meta RequestMeta, endpoint, text string) ([]float64, int, string, error) {
-	payload := llamaEmbeddingRequest{Input: text, Model: "local"}
+	payload := llamaEmbeddingRequest{Input: text, Model: service.embedModelName()}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, "", err
@@ -886,7 +893,7 @@ func (service *LLMService) EmbedTexts(ctx context.Context, meta RequestMeta, tex
 // returning one vector per input in order. Inputs must already be trimmed and
 // truncated. Any failure is returned so EmbedTexts can fall back to per-item.
 func (service *LLMService) embedBatch(ctx context.Context, meta RequestMeta, inputs []string) ([][]float64, error) {
-	payload := llamaEmbeddingRequest{Input: inputs, Model: "local"}
+	payload := llamaEmbeddingRequest{Input: inputs, Model: service.embedModelName()}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -1075,10 +1082,26 @@ func (service *LLMService) newLlamaChatRequest(messages []LLMMessage, maxTokens 
 	return service.newLlamaChatRequestForProfile(messages, maxTokens, stream, enableThinking, ProfileAnswer)
 }
 
+// chatModelName returns the model name to send in chat payloads.
+func (service *LLMService) chatModelName() string {
+	if strings.TrimSpace(service.answerModel) != "" {
+		return service.answerModel
+	}
+	return "local"
+}
+
+// embedModelName returns the model name to send in embedding payloads.
+func (service *LLMService) embedModelName() string {
+	if strings.TrimSpace(service.embedModel) != "" {
+		return service.embedModel
+	}
+	return "local"
+}
+
 func (service *LLMService) newLlamaChatRequestForProfile(messages []LLMMessage, maxTokens int, stream bool, enableThinking bool, profile CallProfile) llamaChatRequest {
 	params := service.samplingForProfile(profile)
 	req := llamaChatRequest{
-		Model:       "local",
+		Model:       service.chatModelName(),
 		Messages:    messages,
 		Temperature: params.Temperature,
 		TopP:        params.TopP,

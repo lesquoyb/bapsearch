@@ -27,6 +27,12 @@ type Config struct {
 	SearchURL            string
 	LlamaURL             string
 	EmbeddingsURL        string
+	// LLMProvider selects how model status is probed: "llamacpp" (default,
+	// the bundled containers) or "ollama" (an external Ollama instance the
+	// OpenAI-compatible endpoints point at).
+	LLMProvider          string
+	AnswerModelName      string
+	EmbedModelName       string
 	DBPath               string
 	SchemaPath           string
 	TemplateGlob         string
@@ -263,6 +269,8 @@ func main() {
 	llm := &LLMService{
 		baseURL:           cfg.LlamaURL,
 		embeddingsURL:     cfg.EmbeddingsURL,
+		answerModel:       cfg.AnswerModelName,
+		embedModel:        cfg.EmbedModelName,
 		client:            &http.Client{Timeout: 10 * time.Minute},
 		logger:            logger,
 		llmLogger:         llmLogger,
@@ -583,6 +591,18 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 		Detail        string `json:"detail,omitempty"`
 	}
 
+	// An external Ollama instance speaks its own management API (/api/*) and
+	// routes by payload model name, so probe it accordingly.
+	if app.cfg.LLMProvider == "ollama" {
+		expected := app.cfg.AnswerModelName
+		if role == modelRoleEmbeddings {
+			expected = app.cfg.EmbedModelName
+		}
+		status, loaded, detail := app.ollamaStatus(r.Context(), role, expected)
+		json.NewEncoder(w).Encode(responsePayload{Role: role, Status: status, ExpectedModel: expected, LoadedModel: loaded, Detail: detail})
+		return
+	}
+
 	parsed, err := url.Parse(app.llamaURLForRole(role))
 	if err != nil {
 		json.NewEncoder(w).Encode(responsePayload{Role: role, Status: "error", ExpectedModel: expectedModel, Detail: "invalid llama url"})
@@ -674,6 +694,82 @@ func (app *App) handleLlamaStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(responsePayload{Role: role, Status: status, ExpectedModel: expectedModel, LoadedModel: loadedModel, Detail: detail})
 }
 
+// ollamaStatus probes an Ollama server: reachability via /api/version, model
+// availability via /api/tags, and in-memory state via /api/ps. A model that
+// is installed but not resident is fine — Ollama loads it on the first call.
+func (app *App) ollamaStatus(ctx context.Context, role, expected string) (status, loadedModel, detail string) {
+	parsed, err := url.Parse(app.llamaURLForRole(role))
+	if err != nil {
+		return "error", "", "invalid endpoint url"
+	}
+	base := parsed.Scheme + "://" + parsed.Host
+
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	getJSON := func(path string, target any) error {
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, base+path, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+		return json.NewDecoder(resp.Body).Decode(target)
+	}
+
+	var version struct {
+		Version string `json:"version"`
+	}
+	if err := getJSON("/api/version", &version); err != nil {
+		return "error", "", "ollama unreachable: " + err.Error()
+	}
+
+	// sameOllamaModel tolerates the implicit ":latest" tag.
+	sameOllamaModel := func(a, b string) bool {
+		a = strings.ToLower(strings.TrimSpace(a))
+		b = strings.ToLower(strings.TrimSpace(b))
+		return a == b || a == b+":latest" || a+":latest" == b
+	}
+
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := getJSON("/api/tags", &tags); err == nil && expected != "" && expected != "local" {
+		found := false
+		for _, m := range tags.Models {
+			if sameOllamaModel(m.Name, expected) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "error", "", fmt.Sprintf("model %q is not pulled in Ollama (try: ollama pull %s)", expected, expected)
+		}
+	}
+
+	var ps struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := getJSON("/api/ps", &ps); err == nil {
+		for _, m := range ps.Models {
+			if sameOllamaModel(m.Name, expected) {
+				return "loaded", m.Name, "ollama " + version.Version
+			}
+		}
+	}
+	return "loaded", "", "installed; loads on first call (ollama " + version.Version + ")"
+}
+
 func (app *App) llamaURLForRole(role string) string {
 	switch normalizeModelRole(role) {
 	case modelRoleEmbeddings:
@@ -704,6 +800,10 @@ func loadConfig() Config {
 		SearchURL:            envOrDefault("SEARXNG_SEARCH_URL", "http://searxng:8080/search"),
 		LlamaURL:             answerURL,
 		EmbeddingsURL:        envOrDefault("LLAMA_CPP_EMBEDDINGS_URL", "http://llama:8080/v1/embeddings"),
+		LLMProvider:          strings.ToLower(envOrDefault("BAP_LLM_PROVIDER", "llamacpp")),
+		// llama.cpp ignores the payload model name; Ollama routes by it.
+		AnswerModelName:      envOrDefault("BAP_ANSWER_MODEL", "local"),
+		EmbedModelName:       envOrDefault("BAP_EMBEDDING_MODEL", "local"),
 		DBPath:               envOrDefault("BAP_DB_PATH", "/database/bap-search.db"),
 		SchemaPath:           envOrDefault("BAP_SCHEMA_PATH", "/app/database/schema.sql"),
 		TemplateGlob:         envOrDefault("BAP_TEMPLATE_GLOB", "/app/ui/templates/*.html"),
